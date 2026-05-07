@@ -1,27 +1,38 @@
 # AGENTS.md
 
-## Project Skills
+## Mandatory Environment Rule
 
-- `update-std-tests`: project-local skill at `.claude/skills/update-std-tests/SKILL.md`
-- Use `update-std-tests` when the user wants to audit or update `scripts/test/std_crates.csv`, compare workspace packages against the std test whitelist, or confirm which new std-test candidates should be added.
-- `starry-test-suit`: project-local skill at `.claude/skills/starry-test-suit/SKILL.md`
-- Use `starry-test-suit` when the user wants to add, regroup, adapt, or validate `test-suit/starryos` cases, including `qemu-*.toml`, `normal`/`stress` grouping, success/fail regexes, or Starry test-suit related CI behavior.
-- `cross-kernel-driver`: project-local skill at `.claude/skills/cross-kernel-driver/SKILL.md`
-- Use `cross-kernel-driver` when the user wants to create, refactor, review, or optimize portable Rust driver crates under `drivers/` by device type, separate Driver Core / Capability Boundary / OS Glue / Runtime layers, handle MMIO/iomap with `mmio-api`, handle DMA with `dma-api`, design IRQ event or queue contracts, or audit OS API coupling in driver code.
-- `review-open-prs`: project-local skill at `.claude/skills/review-open-prs/SKILL.md`
-- Use `review-open-prs` when the user wants to audit all open GitHub PRs, review non-self PRs, re-review PRs updated after their last review, use subagents/worktrees for PR review, compare changes with POSIX/Linux/RFC/VirtIO semantics, run local validation, and submit approve or request-changes reviews.
-- `board-uboot-fsck-repair`: project-local skill at `.claude/skills/board-uboot-fsck-repair/SKILL.md`
-- Use `board-uboot-fsck-repair` when a physical board Linux rootfs needs ext4 recovery through U-Boot, initramfs fsck reports unrepaired corruption, OrangePi-5-Plus needs `extraboardargs=fsckfix`, or Starry board write tests must be bracketed by Linux fsck/boot checks.
+- Do not install toolchains or dependencies on the host machine.
+- Run all build/test/lint/fmt commands inside the Docker container only.
+- Preferred container workflow in this repo:
+  - `docker build -t tgoskits-env -f container/Dockerfile .`
+  - `docker run -it --rm -v "$(pwd)":/workspace -w /workspace tgoskits-env`
+- If using Compose, run commands via `docker compose run --rm tgoskits <command>`.
 
-## Other Requirements
+## Command Policy (Repo-Specific)
 
-- When changing logic, run a relevant `cargo clippy` check after the code change.
-- After modifying a crate, ensure that crate passes clippy. Prefer `cargo xtask clippy --package <crate>` for targeted verification, and if the crate now passes but is missing from `scripts/test/clippy_crates.csv`, add it in the same change.
-- Do not silence clippy warnings with `allow` as a shortcut; prefer fixing the root cause unless the user explicitly asks otherwise.
-- Run `cargo fmt` after code edits.
-- For ArceOS, StarryOS, and Axvisor builds/tests/runs, prefer the `cargo xtask` command family instead of raw `cargo build`, `cargo test`, or `cargo run`.
-- If `cargo xtask` cannot satisfy a special configuration, inspect the `xtask` flow first and only then fall back to native Cargo commands with manually matched arguments.
-- For PRs, issues, review replies, discussions, and similar project-facing submissions, keep the language neutral and project-focused.
-- For PR titles, follow `type(scope): content` in Conventional Commits style. Prefer the main affected crate name as `scope` when one crate clearly dominates the change; for cross-cutting or infrastructure work, broader scopes such as `ci`, `repo`, or `docs` are acceptable.
-- PR title examples: `feat(axbuild): add Starry remote board test flow`, `fix(starry-process): correct tty session cleanup`, `chore(ci): split Starry self-hosted board matrix`.
-- Do not insert agent-related labels, signatures, branding, or other advertisement-style wording such as `codex`, `agent`, `AI`, or similar self-promotional tags unless the user explicitly requests it.
+- For ArceOS/StarryOS/Axvisor, prefer `cargo xtask ...` over raw `cargo build/test/run`.
+- After logic changes, run targeted checks in container:
+  - `cargo fmt`
+  - `cargo xtask clippy --package <crate>`
+- Do not silence clippy warnings with `#[allow(...)]` unless user explicitly asks.
+- If a crate passes clippy and is missing from `scripts/test/clippy_crates.csv`, add it in the same change.
+
+## CI-Accurate Local Verification
+
+- CI order is `fmt` first, then `cargo xtask clippy`, then tests (`cargo xtask test` and OS-specific xtask tests).
+- Use focused test commands first (single package/single case), then broader suites only as needed.
+
+## High-Value Skills In This Repo
+
+- `update-std-tests`: for `scripts/test/std_crates.csv` audits/updates.
+- `starry-test-suit`: for `test-suit/starryos` case/group/config updates.
+- `cross-kernel-driver`: for driver work under `drivers/`.
+- `review-open-prs`: for repository PR review tasks.
+- `board-uboot-fsck-repair`: for OrangePi-5-Plus ext4 fsck recovery flow.
+
+## PR/Communication Conventions
+
+- Keep PR/issues/review text neutral and project-focused.
+- Use Conventional Commits title style: `type(scope): content`.
+- Do not add agent/AI branding text in commits, PRs, or issue comments.
