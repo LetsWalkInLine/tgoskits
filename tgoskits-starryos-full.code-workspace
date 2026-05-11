@@ -1,0 +1,16 @@
+{
+  "folders": [
+    {
+      "path": "."
+    }
+  ],
+  "settings": {
+    "rust-analyzer.checkOnSave": false,
+    "rust-analyzer.cargo.allTargets": false,
+    "rust-analyzer.cargo.targetDir": true,
+    "rust-analyzer.linkedProjects": [
+      "os/StarryOS/kernel/Cargo.toml",
+      "os/StarryOS/starryos/Cargo.toml"
+    ]
+  }
+}

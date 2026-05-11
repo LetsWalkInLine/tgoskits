@@ -1,0 +1,39 @@
+{
+  "folders": [
+    {
+      "path": "."
+    }
+  ],
+  "settings": {
+    "rust-analyzer.cachePriming.enable": false,
+    "rust-analyzer.checkOnSave": false,
+    "rust-analyzer.cargo.allTargets": false,
+    "rust-analyzer.cargo.buildScripts.enable": false,
+    "rust-analyzer.cargo.extraEnv": {
+      "CARGO_NET_OFFLINE": "true"
+    },
+    "rust-analyzer.cargo.metadataExtraArgs": [
+      "--offline"
+    ],
+    "rust-analyzer.cargo.noDeps": true,
+    "rust-analyzer.cargo.targetDir": true,
+    "rust-analyzer.files.exclude": [
+      ".claude",
+      ".devcontainer",
+      "container",
+      "docs",
+      "examples",
+      "os/StarryOS",
+      "os/axvisor",
+      "test-suit/starryos",
+      "xtask"
+    ],
+    "rust-analyzer.linkedProjects": [
+      "os/arceos/api/arceos_api/Cargo.toml",
+      "os/arceos/api/arceos_posix_api/Cargo.toml",
+      "os/arceos/examples/helloworld/Cargo.toml",
+      "os/arceos/examples/shell/Cargo.toml"
+    ],
+    "rust-analyzer.procMacro.enable": false
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "folders": [
+    {
+      "path": "."
+    }
+  ],
+  "settings": {
+    "rust-analyzer.checkOnSave": false,
+    "rust-analyzer.cargo.allTargets": false,
+    "rust-analyzer.cargo.targetDir": true,
+    "rust-analyzer.linkedProjects": [
+      "os/arceos/api/arceos_api/Cargo.toml",
+      "os/arceos/api/arceos_posix_api/Cargo.toml",
+      "os/arceos/examples/helloworld/Cargo.toml",
+      "os/arceos/examples/shell/Cargo.toml"
+    ]
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "folders": [
+    {
+      "path": "."
+    }
+  ],
+  "settings": {
+    "rust-analyzer.checkOnSave": false,
+    "rust-analyzer.cargo.allTargets": false,
+    "rust-analyzer.cargo.targetDir": true,
+    "rust-analyzer.linkedProjects": [
+      "scripts/axbuild/Cargo.toml",
+      "xtask/Cargo.toml"
+    ]
+  }
+}

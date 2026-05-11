@@ -1,0 +1,38 @@
+{
+  "folders": [
+    {
+      "path": "."
+    }
+  ],
+  "settings": {
+    "rust-analyzer.cachePriming.enable": false,
+    "rust-analyzer.checkOnSave": false,
+    "rust-analyzer.cargo.allTargets": false,
+    "rust-analyzer.cargo.buildScripts.enable": false,
+    "rust-analyzer.cargo.extraEnv": {
+      "CARGO_NET_OFFLINE": "true"
+    },
+    "rust-analyzer.cargo.metadataExtraArgs": [
+      "--offline"
+    ],
+    "rust-analyzer.cargo.noDeps": true,
+    "rust-analyzer.cargo.targetDir": true,
+    "rust-analyzer.files.exclude": [
+      ".claude",
+      ".devcontainer",
+      "components",
+      "container",
+      "docs",
+      "drivers",
+      "examples",
+      "os",
+      "platform",
+      "test-suit"
+    ],
+    "rust-analyzer.linkedProjects": [
+      "scripts/axbuild/Cargo.toml",
+      "xtask/Cargo.toml"
+    ],
+    "rust-analyzer.procMacro.enable": false
+  }
+}
