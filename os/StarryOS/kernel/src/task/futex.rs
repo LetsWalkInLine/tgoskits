@@ -41,11 +41,9 @@ pub struct WaitQueue {
 #[derive(Default)]
 struct WaitQueueInner {
     queue: VecDeque<Waiter>,
-    next_id: u64,
 }
 
 struct Waiter {
-    id: u64,
     waker: Waker,
     bitset: u32,
     state: Arc<WaiterState>,
@@ -69,7 +67,6 @@ struct WaitIfFuture<'a, F> {
     queue: &'a WaitQueue,
     bitset: u32,
     condition: Option<F>,
-    waiter_id: Option<u64>,
     state: Option<Arc<WaiterState>>,
 }
 
@@ -87,16 +84,12 @@ impl<F: FnOnce() -> bool> Future for WaitIfFuture<'_, F> {
                 return Poll::Ready(Ok(false));
             }
 
-            let id = inner.next_id;
-            inner.next_id = inner.next_id.wrapping_add(1);
             let state = Arc::new(WaiterState::new());
             inner.queue.push_back(Waiter {
-                id,
                 waker: cx.waker().clone(),
                 bitset: this.bitset,
                 state: state.clone(),
             });
-            this.waiter_id = Some(id);
             this.state = Some(state);
             return Poll::Pending;
         }
@@ -106,15 +99,16 @@ impl<F: FnOnce() -> bool> Future for WaitIfFuture<'_, F> {
         };
 
         if state.woken.load(AtomicOrdering::SeqCst) {
-            this.waiter_id = None;
             this.state = None;
             Poll::Ready(Ok(true))
         } else {
-            if let Some(id) = this.waiter_id {
-                let mut inner = this.queue.inner.lock();
-                if let Some(waiter) = inner.queue.iter_mut().find(|waiter| waiter.id == id) {
-                    waiter.waker = cx.waker().clone();
-                }
+            let mut inner = this.queue.inner.lock();
+            if let Some(waiter) = inner
+                .queue
+                .iter_mut()
+                .find(|waiter| Arc::ptr_eq(&waiter.state, state))
+            {
+                waiter.waker = cx.waker().clone();
             }
             Poll::Pending
         }
@@ -126,12 +120,12 @@ impl<F> Drop for WaitIfFuture<'_, F> {
         if let Some(state) = &self.state {
             state.cancelled.store(true, AtomicOrdering::SeqCst);
         }
-        if let Some(id) = self.waiter_id {
+        if let Some(state) = &self.state {
             self.queue
                 .inner
                 .lock()
                 .queue
-                .retain(|waiter| waiter.id != id);
+                .retain(|waiter| !Arc::ptr_eq(&waiter.state, state));
         }
     }
 }
@@ -158,7 +152,6 @@ impl WaitQueue {
                 queue: self,
                 bitset,
                 condition: Some(condition),
-                waiter_id: None,
                 state: None,
             },
         )))??

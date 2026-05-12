@@ -7,8 +7,10 @@
 #include <sched.h>
 #include <stdatomic.h>
 #include <stdint.h>
+#include <sys/mman.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -26,6 +28,10 @@
 
 #ifndef FUTEX_WAKE_BITSET
 #define FUTEX_WAKE_BITSET 10
+#endif
+
+#ifndef FUTEX_REQUEUE
+#define FUTEX_REQUEUE 3
 #endif
 
 #ifndef FUTEX_PRIVATE_FLAG
@@ -59,10 +65,15 @@ struct robust_test_node {
 };
 
 static _Atomic uint32_t futex_word = 0;
+static _Atomic uint32_t requeue_src = 0;
+static _Atomic uint32_t requeue_dst = 0;
 static _Atomic int waiter_ready = 0;
+static _Atomic int target_waiter_ready = 0;
+static _Atomic int source_waiter_ready = 0;
 static _Atomic int bitset_waiter_ret = 0;
 
 static struct local_robust_list_head robust_head;
+static struct local_robust_list_head robust_syscall_head;
 static struct robust_test_node robust_node;
 static _Atomic int robust_owner_ready = 0;
 static _Atomic int robust_owner_can_exit = 0;
@@ -89,6 +100,18 @@ static long raw_get_robust_list(pid_t tid, struct local_robust_list_head **head,
 {
     errno = 0;
     return syscall(SYS_get_robust_list, tid, head, size);
+}
+
+static void wait_child_ok(pid_t pid, const char *msg)
+{
+    int status = 0;
+    pid_t waited;
+
+    do {
+        waited = waitpid(pid, &status, 0);
+    } while (waited == -1 && errno == EINTR);
+
+    CHECK(waited == pid && WIFEXITED(status) && WEXITSTATUS(status) == 0, msg);
 }
 
 static void add_ms_to_timespec(struct timespec *ts, long ms)
@@ -121,6 +144,17 @@ static void short_settle(void)
     nanosleep(&ts, NULL);
 }
 
+static long elapsed_ms(const struct timespec *start, const struct timespec *end)
+{
+    return (end->tv_sec - start->tv_sec) * 1000L +
+           (end->tv_nsec - start->tv_nsec) / 1000000L;
+}
+
+static uint32_t shared_atomic_load(uint32_t *word)
+{
+    return __sync_fetch_and_add(word, 0);
+}
+
 static void *basic_waiter_thread(void *arg)
 {
     (void)arg;
@@ -148,6 +182,34 @@ static void *bitset_waiter_thread(void *arg)
                           (int)((ret == 0) ? 0 : -errno),
                           memory_order_release);
     return NULL;
+}
+
+static void *requeue_target_waiter_thread(void *arg)
+{
+    (void)arg;
+    const struct timespec timeout = {
+        .tv_sec = 0,
+        .tv_nsec = 800 * 1000 * 1000,
+    };
+
+    atomic_store_explicit(&target_waiter_ready, 1, memory_order_release);
+    long ret = raw_futex((uint32_t *)&requeue_dst,
+                         FUTEX_WAIT | FUTEX_PRIVATE_FLAG, 0, &timeout, NULL, 0);
+    return (void *)(intptr_t)((ret == 0) ? 0 : -errno);
+}
+
+static void *requeue_source_waiter_thread(void *arg)
+{
+    (void)arg;
+    const struct timespec timeout = {
+        .tv_sec = 5,
+        .tv_nsec = 0,
+    };
+
+    atomic_store_explicit(&source_waiter_ready, 1, memory_order_release);
+    long ret = raw_futex((uint32_t *)&requeue_src,
+                         FUTEX_WAIT | FUTEX_PRIVATE_FLAG, 0, &timeout, NULL, 0);
+    return (void *)(intptr_t)((ret == 0) ? 0 : -errno);
 }
 
 static void join_thread(pthread_t thread, void **result)
@@ -193,6 +255,29 @@ static void test_futex_basic(void)
     CHECK_ERR(raw_futex((uint32_t *)&futex_word, FUTEX_INVALID_OP, 0, NULL,
                         NULL, 0),
               ENOSYS, "invalid futex operation returns ENOSYS");
+
+    CHECK_ERR(raw_futex(NULL, FUTEX_WAIT, 0, NULL, NULL, 0),
+              EFAULT, "FUTEX_WAIT rejects a NULL user pointer");
+}
+
+static void test_futex_timeout_duration(void)
+{
+    printf("\n--- FUTEX_WAIT timeout duration ---\n");
+    struct timespec start;
+    struct timespec end;
+    const struct timespec timeout = {
+        .tv_sec = 0,
+        .tv_nsec = 100 * 1000 * 1000,
+    };
+
+    atomic_store_explicit(&futex_word, 0, memory_order_relaxed);
+    CHECK(clock_gettime(CLOCK_MONOTONIC, &start) == 0, "clock_gettime start succeeds");
+    CHECK_ERR(raw_futex((uint32_t *)&futex_word,
+                        FUTEX_WAIT | FUTEX_PRIVATE_FLAG, 0, &timeout, NULL, 0),
+              ETIMEDOUT, "FUTEX_WAIT timeout returns ETIMEDOUT");
+    CHECK(clock_gettime(CLOCK_MONOTONIC, &end) == 0, "clock_gettime end succeeds");
+    CHECK(elapsed_ms(&start, &end) >= 50,
+          "FUTEX_WAIT waits for a meaningful timeout duration");
 }
 
 static void test_futex_wait_wake(void)
@@ -222,6 +307,148 @@ static void test_futex_wait_wake(void)
     void *result = NULL;
     join_thread(waiter, &result);
     CHECK((int)(intptr_t)result == 0, "FUTEX_WAIT waiter returns 0 after wake");
+}
+
+static void test_futex_shared_fork(void)
+{
+    printf("\n--- shared FUTEX_WAIT/FUTEX_WAKE across fork ---\n");
+    uint32_t *shared = mmap(NULL, sizeof(*shared), PROT_READ | PROT_WRITE,
+                            MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    CHECK(shared != MAP_FAILED, "mmap shared futex word succeeds");
+    if (shared == MAP_FAILED) {
+        return;
+    }
+
+    *shared = 1;
+    pid_t pid = fork();
+    CHECK(pid >= 0, "fork child succeeds");
+    if (pid == 0) {
+        usleep(50 * 1000);
+        *shared = 2;
+        (void)raw_futex(shared, FUTEX_WAKE, 1, NULL, NULL, 0);
+        _exit(0);
+    }
+
+    long ret = raw_futex(shared, FUTEX_WAIT, 1, NULL, NULL, 0);
+    CHECK(ret == 0 || (ret == -1 && errno == EAGAIN),
+          "parent wait either blocks until child wake or observes child update");
+    CHECK(*shared == 2, "shared futex word updated by child");
+    wait_child_ok(pid, "fork child exits successfully");
+    CHECK(munmap(shared, sizeof(*shared)) == 0, "munmap shared futex word succeeds");
+}
+
+static void test_futex_shared_wake_count(void)
+{
+    printf("\n--- shared FUTEX_WAKE count across forked waiters ---\n");
+    uint32_t *shared = mmap(NULL, sizeof(*shared), PROT_READ | PROT_WRITE,
+                            MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    uint32_t *ready_count = mmap(NULL, sizeof(*ready_count), PROT_READ | PROT_WRITE,
+                                 MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    uint32_t *returned_count = mmap(NULL, sizeof(*returned_count), PROT_READ | PROT_WRITE,
+                                    MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    CHECK(shared != MAP_FAILED && ready_count != MAP_FAILED && returned_count != MAP_FAILED,
+          "mmap shared futex/count words succeeds");
+    if (shared == MAP_FAILED || ready_count == MAP_FAILED || returned_count == MAP_FAILED) {
+        return;
+    }
+
+    *shared = 1;
+    *ready_count = 0;
+    *returned_count = 0;
+    pid_t pids[3];
+    for (size_t i = 0; i < 3; i++) {
+        pids[i] = fork();
+        CHECK(pids[i] >= 0, "fork waiter child succeeds");
+        if (pids[i] == 0) {
+            const struct timespec timeout = {
+                .tv_sec = 2,
+                .tv_nsec = 0,
+            };
+
+            __sync_fetch_and_add(ready_count, 1);
+            long ret = raw_futex(shared, FUTEX_WAIT, 1, &timeout, NULL, 0);
+            if (ret == 0 || (ret == -1 && errno == EAGAIN)) {
+                __sync_fetch_and_add(returned_count, 1);
+                _exit(0);
+            }
+            _exit(1);
+        }
+    }
+
+    while (shared_atomic_load(ready_count) < 3) {
+        sched_yield();
+    }
+    usleep(100 * 1000);
+    long woke = raw_futex(shared, FUTEX_WAKE, 2, NULL, NULL, 0);
+    CHECK(woke >= 1 && woke <= 2, "FUTEX_WAKE(2) wakes at most two waiters");
+
+    usleep(100 * 1000);
+    uint32_t first_returned_count = shared_atomic_load(returned_count);
+    CHECK(first_returned_count >= 1 && first_returned_count <= 2,
+          "only the requested subset of waiters returns before final wake");
+
+    *shared = 2;
+    (void)raw_futex(shared, FUTEX_WAKE, 3, NULL, NULL, 0);
+    for (size_t i = 0; i < 3; i++) {
+        wait_child_ok(pids[i], "fork waiter child exits successfully");
+    }
+    CHECK(shared_atomic_load(returned_count) == 3, "all forked waiters eventually return");
+
+    CHECK(munmap(shared, sizeof(*shared)) == 0, "munmap shared futex word succeeds");
+    CHECK(munmap(ready_count, sizeof(*ready_count)) == 0, "munmap shared ready word succeeds");
+    CHECK(munmap(returned_count, sizeof(*returned_count)) == 0, "munmap shared count word succeeds");
+}
+
+static void test_futex_requeue_id_collision_regression(void)
+{
+    printf("\n--- FUTEX_REQUEUE id collision regression ---\n");
+    pthread_t target_waiter;
+    pthread_t source_waiter;
+
+    atomic_store_explicit(&requeue_src, 0, memory_order_relaxed);
+    atomic_store_explicit(&requeue_dst, 0, memory_order_relaxed);
+    atomic_store_explicit(&target_waiter_ready, 0, memory_order_relaxed);
+    atomic_store_explicit(&source_waiter_ready, 0, memory_order_relaxed);
+
+    int err = pthread_create(&target_waiter, NULL, requeue_target_waiter_thread, NULL);
+    CHECK(err == 0, "pthread_create target waiter succeeds");
+    if (err != 0) {
+        exit(1);
+    }
+    while (atomic_load_explicit(&target_waiter_ready, memory_order_acquire) == 0) {
+        sched_yield();
+    }
+    short_settle();
+
+    err = pthread_create(&source_waiter, NULL, requeue_source_waiter_thread, NULL);
+    CHECK(err == 0, "pthread_create source waiter succeeds");
+    if (err != 0) {
+        exit(1);
+    }
+    while (atomic_load_explicit(&source_waiter_ready, memory_order_acquire) == 0) {
+        sched_yield();
+    }
+    short_settle();
+
+    long requeued = raw_futex((uint32_t *)&requeue_src,
+                              FUTEX_REQUEUE | FUTEX_PRIVATE_FLAG, 0,
+                              (const struct timespec *)(uintptr_t)1,
+                              (uint32_t *)&requeue_dst, 0);
+    CHECK_RET(requeued, 1, "FUTEX_REQUEUE moves one source waiter to target futex");
+
+    void *target_result = NULL;
+    join_thread(target_waiter, &target_result);
+    CHECK((int)(intptr_t)target_result == -ETIMEDOUT,
+          "original target waiter times out without removing requeued waiter");
+
+    CHECK_RET(raw_futex((uint32_t *)&requeue_dst,
+                        FUTEX_WAKE | FUTEX_PRIVATE_FLAG, 1, NULL, NULL, 0),
+              1, "target FUTEX_WAKE still sees the requeued source waiter");
+
+    void *source_result = NULL;
+    join_thread(source_waiter, &source_result);
+    CHECK((int)(intptr_t)source_result == 0,
+          "requeued source waiter returns after target futex wake");
 }
 
 static void test_futex_bitset(void)
@@ -276,23 +503,22 @@ static void test_futex_bitset(void)
 static void test_robust_list_syscalls(void)
 {
     printf("\n--- set_robust_list/get_robust_list ABI ---\n");
-    struct local_robust_list_head head = {
-        .list.next = &head.list,
-        .futex_offset = 0,
-        .list_op_pending = NULL,
-    };
     struct local_robust_list_head *got_head = NULL;
     size_t got_size = 0;
 
-    CHECK_RET(raw_set_robust_list(&head, sizeof(head)), 0,
+    robust_syscall_head.list.next = &robust_syscall_head.list;
+    robust_syscall_head.futex_offset = 0;
+    robust_syscall_head.list_op_pending = NULL;
+
+    CHECK_RET(raw_set_robust_list(&robust_syscall_head, sizeof(robust_syscall_head)), 0,
               "set_robust_list accepts a valid head and size");
     CHECK_RET(raw_get_robust_list(0, &got_head, &got_size), 0,
               "get_robust_list(0) succeeds");
-    CHECK(got_head == &head, "get_robust_list returns the head just set");
-    CHECK(got_size == sizeof(head),
+    CHECK(got_head == &robust_syscall_head, "get_robust_list returns the head just set");
+    CHECK(got_size == sizeof(robust_syscall_head),
           "get_robust_list returns sizeof(struct robust_list_head)");
 
-    CHECK_ERR(raw_set_robust_list(&head, sizeof(head) - 1), EINVAL,
+    CHECK_ERR(raw_set_robust_list(&robust_syscall_head, sizeof(robust_syscall_head) - 1), EINVAL,
               "set_robust_list rejects an invalid size");
     CHECK_ERR(raw_get_robust_list(0, (struct local_robust_list_head **)1,
                                   &got_size),
@@ -409,7 +635,11 @@ int main(void)
     TEST_START("futex and robust-list syscalls");
 
     test_futex_basic();
+    test_futex_timeout_duration();
     test_futex_wait_wake();
+    test_futex_shared_fork();
+    test_futex_shared_wake_count();
+    test_futex_requeue_id_collision_regression();
     test_futex_bitset();
     test_robust_list_syscalls();
     test_robust_list_owner_death();
