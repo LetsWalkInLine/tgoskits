@@ -1,0 +1,200 @@
+format_version = 1
+
+welcome_message = """
+Welcome to Futexlings.
+
+This course starts with Rust synchronization primitives, then moves through the Linux futex syscall ABI and finishes with kernel-side futex design models. It assumes you already know basic Rust syntax.
+"""
+
+final_message = """
+You finished Futexlings.
+
+At this point you should be able to explain futexes from three viewpoints: user-space fast paths, the Linux futex syscall ABI, and the kernel invariants that prevent lost wakeups.
+"""
+
+[[exercises]]
+name = "u01_mutex_counter"
+dir = "01_userspace"
+test = true
+hint = "Use `Arc<Mutex<u32>>`. Each worker should lock the mutex, increment the guarded value, then let the guard drop before the next iteration."
+
+[[exercises]]
+name = "u02_condvar_wait_loop"
+dir = "01_userspace"
+test = true
+hint = "A condvar wait returns a mutex guard. Keep assigning the returned guard and keep checking the predicate in a `while` loop."
+
+[[exercises]]
+name = "u03_spurious_wakeup"
+dir = "01_userspace"
+test = true
+hint = "Treat every wakeup as only a hint that the condition might have changed. Replace the single `if` check with a loop around `wait`."
+
+[[exercises]]
+name = "u04_atomic_fast_path"
+dir = "01_userspace"
+test = true
+hint = "The uncontended path is a compare-and-exchange from 0 to 1. Unlocking stores 0 with release ordering."
+
+[[exercises]]
+name = "u05_spin_then_park"
+dir = "01_userspace"
+test = true
+hint = "Try a CAS first. If it fails, wait on a condvar while the atomic state still says the lock is held, then retry the CAS."
+
+[[exercises]]
+name = "u06_lost_wakeup_model"
+dir = "01_userspace"
+test = true
+hint = "The waiter must re-check the value while it is protected by the same model lock used to enqueue itself."
+
+[[exercises]]
+name = "u07_minifutex_api"
+dir = "01_userspace"
+test = true
+hint = "`wait(expected)` should return immediately when the current value differs. Otherwise it should wait until a wake changes the situation."
+
+[[exercises]]
+name = "u08_timeout"
+dir = "01_userspace"
+test = true
+hint = "`Condvar::wait_timeout_while` is a compact way to distinguish timeout from a real state change."
+
+[[exercises]]
+name = "u09_bitset"
+dir = "01_userspace"
+test = true
+hint = "A waiter is eligible only when `waiter.mask & wake_mask != 0`. Remove only eligible waiters up to the requested count."
+
+[[exercises]]
+name = "u10_requeue"
+dir = "01_userspace"
+test = true
+hint = "First compare the futex word. Then wake the first waiters from the source queue and move later waiters to the destination queue."
+
+[[exercises]]
+name = "l01_futex_word"
+dir = "02_linux_abi"
+test = true
+hint = "A futex word is just user memory. Model it as an `AtomicU32`; the kernel only participates in wait/wake slow paths."
+
+[[exercises]]
+name = "l02_wait_eagain"
+dir = "02_linux_abi"
+test = true
+skip_check_unsolved = true
+hint = "On Linux, `FUTEX_WAIT` first compares the futex word with `expected`. Mismatch should fail with `EAGAIN` instead of sleeping."
+
+[[exercises]]
+name = "l03_wait_wake_threads"
+dir = "02_linux_abi"
+test = true
+skip_check_unsolved = true
+hint = "The waiter loops while the atomic word is 0 and uses `FUTEX_WAIT_PRIVATE`. The waker stores 1, then calls `FUTEX_WAKE_PRIVATE`."
+
+[[exercises]]
+name = "l04_private_flag"
+dir = "02_linux_abi"
+test = true
+hint = "`FUTEX_PRIVATE_FLAG` is ORed into the futex operation when the futex is only shared by threads in one process."
+
+[[exercises]]
+name = "l05_wait_timeout"
+dir = "02_linux_abi"
+test = true
+skip_check_unsolved = true
+hint = "`FUTEX_WAIT` uses a relative `timespec` timeout. Waiting on an unchanged value should end with `ETIMEDOUT`."
+
+[[exercises]]
+name = "l06_wait_bitset_absolute_timeout"
+dir = "02_linux_abi"
+test = true
+skip_check_unsolved = true
+hint = "`FUTEX_WAIT_BITSET` uses an absolute timeout and the bitset argument must be nonzero."
+
+[[exercises]]
+name = "l07_shared_mapping"
+dir = "02_linux_abi"
+test = true
+skip_check_unsolved = true
+hint = "Cross-process futexes need shared memory and the non-private futex operations."
+
+[[exercises]]
+name = "l08_wake_count"
+dir = "02_linux_abi"
+test = true
+skip_check_unsolved = true
+hint = "`FUTEX_WAKE(n)` reports how many waiters were woken, capped by the requested wake count and actual waiters."
+
+[[exercises]]
+name = "l09_cmp_requeue"
+dir = "02_linux_abi"
+test = true
+skip_check_unsolved = true
+hint = "`FUTEX_CMP_REQUEUE` compares the source futex word, wakes some waiters, and moves the rest to another futex queue."
+
+[[exercises]]
+name = "l10_robust_mutex_surface"
+dir = "02_linux_abi"
+test = true
+hint = "A robust pthread mutex reports owner death as a recoverable lock result. The next owner must repair state and mark the mutex consistent."
+
+[[exercises]]
+name = "k01_waiter_queue"
+dir = "03_kernel_model"
+test = true
+hint = "Hash the futex key to a bucket. `wake` removes waiters from that bucket in FIFO order up to the requested count."
+
+[[exercises]]
+name = "k02_key_identity"
+dir = "03_kernel_model"
+test = true
+hint = "Private keys include the memory manager identity. Shared keys should identify the backing object and page/word offset."
+
+[[exercises]]
+name = "k03_atomic_wait_invariant"
+dir = "03_kernel_model"
+test = true
+hint = "After taking the bucket lock, re-read the user value before enqueueing. If it changed, return mismatch."
+
+[[exercises]]
+name = "k04_wake_filter"
+dir = "03_kernel_model"
+test = true
+hint = "Wake filtering is the queue version of the bitset rule: only waiters whose mask intersects the wake mask are eligible."
+
+[[exercises]]
+name = "k05_requeue_lock_order"
+dir = "03_kernel_model"
+test = true
+hint = "When two buckets are involved, take locks in bucket-index order. If both keys hash to the same bucket, lock it once."
+
+[[exercises]]
+name = "k06_timeout_clock_model"
+dir = "03_kernel_model"
+test = true
+hint = "A relative timeout adds a duration to the selected clock's current value. An absolute timeout is already a deadline on that clock."
+
+[[exercises]]
+name = "k07_robust_list_abi"
+dir = "03_kernel_model"
+test = true
+hint = "Scan each robust list node and add `futex_offset` to find the futex word. Also consider `list_op_pending`."
+
+[[exercises]]
+name = "k08_handle_futex_death"
+dir = "03_kernel_model"
+test = true
+hint = "Only modify words whose owner TID bits match the exiting task. Clear the TID bits, set `FUTEX_OWNER_DIED`, and wake a waiter."
+
+[[exercises]]
+name = "k09_pi_boundary"
+dir = "03_kernel_model"
+test = true
+hint = "Normal futexes only block and wake. PI futexes let the kernel track ownership so it can donate priority."
+
+[[exercises]]
+name = "k10_linux_review_quiz"
+dir = "03_kernel_model"
+test = true
+hint = "Answer from the invariant level: user memory is authoritative, kernel queues are slow-path state, and robust lists repair owner death."
