@@ -5,9 +5,16 @@
 - Do not install toolchains or dependencies on the host machine.
 - Run all build/test/lint/fmt commands inside the Docker container only.
 - Preferred container workflow in this repo:
-  - `docker build -t tgoskits-env -f container/Dockerfile .`
-  - `docker run -it --rm -v "$(pwd)":/workspace -w /workspace tgoskits-env`
-- If using Compose, run commands via `docker compose run --rm tgoskits <command>`.
+  - Build the image if needed: `docker build -t tgoskits-env -f container/Dockerfile .`
+  - Reuse a single long-lived Compose container for the entire task instead of creating a fresh container per command.
+  - First check whether the service container is already running: `docker compose ps --status running -q tgoskits`
+  - If it is already running, execute commands in it via `docker compose exec -T tgoskits <command>`.
+  - If it exists but is stopped, start it via `docker compose start tgoskits`, then execute commands via `docker compose exec -T tgoskits <command>`.
+  - If it does not exist yet, create and start it via `docker compose up -d tgoskits`, then execute commands via `docker compose exec -T tgoskits <command>`.
+  - Keep this container running for the full development task and stop it only after the task is complete.
+  - Do not use `docker run`, `docker compose run --rm`, or any other per-command container workflow for normal development in this repo.
+  - Because `docker-compose.yml` enables `tty: true`, prefer `docker compose exec -T ...` for agent-driven or other non-interactive commands so command output is captured correctly.
+  - If the container state does not match the cases above, or a command truly requires an interactive TTY session, ask the user before proceeding.
 
 ## Command Policy (Repo-Specific)
 
