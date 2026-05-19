@@ -14,7 +14,7 @@ use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
 use core::{
     cell::RefCell,
     ops::Deref,
-    sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicUsize, Ordering},
 };
 
 use ax_hal::time::TimeValue;
@@ -34,6 +34,8 @@ pub use self::{
     cred::*, futex::*, ops::*, posix_timer::PosixTimerTable, resources::*, signal::*, stat::*,
     timer::*, user::*,
 };
+#[cfg(feature = "kcov")]
+use crate::kcov::KcovThreadState;
 use crate::mm::AddrSpace;
 
 /// Size of the syscall instruction for the current architecture.
@@ -125,6 +127,21 @@ pub struct Thread {
 
     /// Process credentials (uid, gid, etc.).
     cred: SpinNoIrq<Arc<Cred>>,
+
+    /// KCOV coverage state for this thread.
+    #[cfg(feature = "kcov")]
+    kcov: AssumeSync<RefCell<Option<KcovThreadState>>>,
+
+    /// Signo (as u8) of the synchronous user-mode fault that
+    /// [`raise_signal_fatal`] last force-delivered to this thread, or 0
+    /// for "no fault dump owed". [`check_signals`] only emits the
+    /// register dump when the signal it is about to terminate on
+    /// matches this signo — otherwise a low-numbered pending signal
+    /// (e.g. an external SIGTERM that landed before the SIGSEGV from a
+    /// page fault) would consume the flag and either dump for the
+    /// wrong context or, if it had a user handler, swallow the dump so
+    /// the real fault terminated silently.
+    pub fault_dump_signo: AtomicU8,
 }
 
 impl Thread {
@@ -148,6 +165,10 @@ impl Thread {
             rseq_area: AtomicUsize::new(0),
             pdeathsig: AtomicU32::new(0),
             cred: SpinNoIrq::new(cred),
+            #[cfg(feature = "kcov")]
+            kcov: AssumeSync(RefCell::new(None)),
+
+            fault_dump_signo: AtomicU8::new(0),
         })
     }
 
@@ -212,6 +233,26 @@ impl Thread {
     /// Set the pdeathsig value.
     pub fn set_pdeathsig(&self, sig: u32) {
         self.pdeathsig.store(sig, Ordering::Relaxed);
+    }
+
+    /// Run a closure with a borrow of the current KCOV state for this thread.
+    ///
+    /// Uses `try_borrow` so that a trace call inside `set_kcov`'s
+    /// `borrow_mut` does not panic when the instrumented hot path
+    /// re-enters here. Avoids cloning the `Arc<SharedPages>` on every
+    /// hot-path invocation.
+    #[cfg(feature = "kcov")]
+    pub fn with_kcov<R>(&self, f: impl FnOnce(Option<&KcovThreadState>) -> R) -> R {
+        match self.kcov.0.try_borrow() {
+            Ok(borrow) => f(borrow.as_ref()),
+            Err(_) => f(None),
+        }
+    }
+
+    /// Set the KCOV state for this thread.
+    #[cfg(feature = "kcov")]
+    pub fn set_kcov(&self, state: Option<KcovThreadState>) {
+        *self.kcov.0.borrow_mut() = state;
     }
 
     /// Get a snapshot of the current credentials (clones the `Arc`).
@@ -370,6 +411,19 @@ pub struct ProcessData {
 
     /// POSIX per-process interval timers (timer_create/timer_settime/etc.)
     pub posix_timers: Arc<PosixTimerTable>,
+
+    /// `true` when this process shares its [`AddrSpace`] with a parent/sibling
+    /// (`CLONE_VM`, e.g. vfork / posix_spawn). In that case the last thread must
+    /// **not** clear the address space on exit — the co-owner may still be
+    /// running.
+    ///
+    /// `false` for normal `fork()` children and after a successful `execve`
+    /// installs a private address space.
+    vm_aspace_shared: AtomicBool,
+
+    /// Set after [`Self::release_aspace_slot_if_needed`] runs so `Drop` does not
+    /// double-decrement [`AddrSpace::process_slots`].
+    aspace_slot_released: AtomicBool,
 }
 
 impl ProcessData {
@@ -381,8 +435,9 @@ impl ProcessData {
         aspace: Arc<Mutex<AddrSpace>>,
         signal_actions: Arc<SpinNoIrq<SignalActions>>,
         exit_signal: Option<Signo>,
+        vm_aspace_shared: bool,
     ) -> Arc<Self> {
-        Arc::new(Self {
+        let this = Arc::new(Self {
             proc,
             exe_path: RwLock::new(exe_path),
             cmdline: RwLock::new(cmdline),
@@ -411,7 +466,45 @@ impl ProcessData {
             children_cpu_time: SpinNoIrq::new((TimeValue::ZERO, TimeValue::ZERO)),
 
             posix_timers: Arc::new(PosixTimerTable::default()),
-        })
+
+            vm_aspace_shared: AtomicBool::new(vm_aspace_shared),
+            aspace_slot_released: AtomicBool::new(false),
+        });
+        // Clone the Arc in a separate statement: a temporary `SpinNoIrq` guard
+        // from `lock()` lives until the end of the statement, so calling
+        // `attach_process_slot` (which locks `Mutex<AddrSpace>`) in the same
+        // expression would nest a sleepable lock inside atomic context.
+        let aspace_arc = this.aspace.lock().clone();
+        crate::mm::attach_process_slot(&aspace_arc);
+        this
+    }
+
+    /// Whether this process shares its VM address space (`CLONE_VM`).
+    #[inline]
+    pub fn vm_aspace_shared(&self) -> bool {
+        self.vm_aspace_shared.load(Ordering::Acquire)
+    }
+
+    /// Called after `execve` commits a fresh private address space so exit
+    /// teardown may clear VMAs without touching a vfork parent's mappings.
+    #[inline]
+    pub fn mark_vm_aspace_private_after_exec(&self) {
+        self.vm_aspace_shared.store(false, Ordering::Release);
+    }
+
+    /// Release this process's [`AddrSpace::process_slots`] entry.
+    ///
+    /// Invoked from the last-thread exit path so inode-scoped accounting (memfd
+    /// shared-writable counts, etc.) is torn down before `waitpid` returns, and
+    /// again from `Drop` if not already run. Uses reference counting: only the
+    /// last slot holder triggers [`AddrSpace::clear`], so `CLONE_VM` co-owners
+    /// are unaffected.
+    pub fn release_aspace_slot_if_needed(&self) {
+        if self.aspace_slot_released.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let aspace = self.aspace.lock().clone();
+        crate::mm::release_process_slot(&aspace);
     }
 
     /// Get the top address of the user heap.
@@ -494,11 +587,13 @@ impl ProcessData {
     /// `mem::replace` moves the old Arc out of the guard so it is dropped
     /// **after** the `SpinNoIrq` guard, in normal preemptible context.
     pub fn replace_aspace(&self, new_aspace: Arc<Mutex<AddrSpace>>) {
-        let _old = {
+        let old = {
             let mut guard = self.aspace.lock();
             core::mem::replace(&mut *guard, new_aspace)
         };
-        // `_old` drops here — SpinNoIrq already released, IRQs re-enabled.
+        crate::mm::release_process_slot(&old);
+        let aspace_arc = self.aspace.lock().clone();
+        crate::mm::attach_process_slot(&aspace_arc);
     }
 
     /// Set the vfork completion (called on the child after a vfork,
@@ -544,6 +639,12 @@ impl ProcessData {
             // guard dropped here
         };
         wq.notify_one(true);
+    }
+}
+
+impl Drop for ProcessData {
+    fn drop(&mut self) {
+        self.release_aspace_slot_if_needed();
     }
 }
 
