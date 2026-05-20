@@ -578,6 +578,21 @@ fn case_asset_cache_key(
     hash_token(&mut hasher, target);
     hash_token(&mut hasher, case.display_name.as_str());
     hash_token(&mut hasher, pipeline.as_str());
+    hash_token(&mut hasher, "test-commands");
+    for command in &case.test_commands {
+        hash_token(&mut hasher, command);
+    }
+    hash_token(&mut hasher, "subcases");
+    for subcase in &case.subcases {
+        hash_token(&mut hasher, &subcase.name);
+        hash_token(
+            &mut hasher,
+            match subcase.kind {
+                TestQemuSubcaseKind::C => "c",
+                TestQemuSubcaseKind::Rust => "rust",
+            },
+        );
+    }
     for var in &config.cache_env_vars {
         hash_token(&mut hasher, var);
         hash_token(&mut hasher, std::env::var(var).unwrap_or_default().as_str());
@@ -1000,6 +1015,66 @@ mod tests {
         assert!(content.contains("SUITE_GROUPED_TEST_BEGIN: /usr/bin/alpha"));
         assert!(content.contains("SUITE_GROUPED_TEST_FAILED: /usr/bin/beta --flag"));
         assert!(content.contains("SUITE_GROUPED_TESTS_PASSED"));
+    }
+
+    #[test]
+    fn grouped_case_asset_cache_key_includes_filtered_commands_and_subcases() {
+        let root = tempdir().unwrap();
+        let shared_img = root.path().join("rootfs.img");
+        fs::write(&shared_img, b"rootfs").unwrap();
+
+        let mut case = fake_case(root.path(), "grouped");
+        let subcase_dir = case.case_dir.join("alpha");
+        fs::create_dir_all(&subcase_dir).unwrap();
+        case.test_commands = vec!["/usr/bin/alpha".to_string()];
+        case.subcases = vec![TestQemuSubcase {
+            name: "alpha".to_string(),
+            case_dir: subcase_dir,
+            kind: TestQemuSubcaseKind::C,
+        }];
+
+        let layout =
+            case_asset_layout(root.path(), "x86_64-unknown-none", &case.display_name).unwrap();
+        let alpha_key = case_asset_cache_key(
+            "x86_64",
+            "x86_64-unknown-none",
+            CasePipeline::Grouped,
+            &case,
+            &shared_img,
+            &fake_config(),
+        )
+        .unwrap();
+
+        case.test_commands = vec!["/usr/bin/beta".to_string()];
+        let beta_command_key = case_asset_cache_key(
+            "x86_64",
+            "x86_64-unknown-none",
+            CasePipeline::Grouped,
+            &case,
+            &shared_img,
+            &fake_config(),
+        )
+        .unwrap();
+
+        case.test_commands = vec!["/usr/bin/alpha".to_string()];
+        case.subcases.clear();
+        let no_subcase_key = case_asset_cache_key(
+            "x86_64",
+            "x86_64-unknown-none",
+            CasePipeline::Grouped,
+            &case,
+            &shared_img,
+            &fake_config(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            layout.work_dir,
+            root.path()
+                .join("target/x86_64-unknown-none/qemu-cases/grouped")
+        );
+        assert_ne!(alpha_key, beta_command_key);
+        assert_ne!(alpha_key, no_subcase_key);
     }
 
     #[test]

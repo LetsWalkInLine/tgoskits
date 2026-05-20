@@ -62,9 +62,22 @@ pub struct ArgsTestQemu {
         short = 'c',
         long = "test-case",
         value_name = "CASE",
-        help = "Run only one StarryOS QEMU test case"
+        help = "Run only one StarryOS QEMU test case; grouped subcases may be addressed as \
+                CASE/SUBCASE"
     )]
     pub test_case: Option<String>,
+    #[arg(
+        long = "subcase",
+        value_name = "SUBCASE",
+        help = "For grouped QEMU cases, build and run only this subcase; may be repeated"
+    )]
+    pub subcases: Vec<String>,
+    #[arg(
+        long = "test-command",
+        value_name = "COMMAND",
+        help = "For grouped QEMU cases, run only matching guest command(s); may be repeated"
+    )]
+    pub test_commands: Vec<String>,
     #[arg(long, help = "Run stress StarryOS qemu test cases")]
     pub stress: bool,
     #[arg(short = 'l', long, help = "List discovered StarryOS QEMU test cases")]
@@ -413,8 +426,102 @@ fn collect_board_test_groups(
     Ok(groups)
 }
 
+fn discover_qemu_cases_with_grouped_shorthand(
+    workspace_root: &Path,
+    arch: &str,
+    target: &str,
+    selected_case: Option<&str>,
+    group: &str,
+    explicit_filter: &qemu_test::GroupedQemuCaseFilter,
+) -> anyhow::Result<(Vec<StarryQemuCase>, Option<String>)> {
+    let original_err = match discover_qemu_cases(workspace_root, arch, target, selected_case, group)
+    {
+        Ok(cases) => return Ok((cases, None)),
+        Err(err) => err,
+    };
+
+    if !explicit_filter.is_empty() {
+        return Err(original_err);
+    }
+    let Some(selected_case) = selected_case else {
+        return Err(original_err);
+    };
+    let Some((case_name, subcase_name)) = split_grouped_case_shorthand(selected_case) else {
+        return Err(original_err);
+    };
+
+    match discover_qemu_cases(workspace_root, arch, target, Some(case_name), group) {
+        Ok(cases) => Ok((cases, Some(subcase_name.to_string()))),
+        Err(_) => Err(original_err),
+    }
+}
+
+fn split_grouped_case_shorthand(selected_case: &str) -> Option<(&str, &str)> {
+    let (case_name, subcase_name) = selected_case.rsplit_once('/')?;
+    if case_name.is_empty() || subcase_name.is_empty() {
+        return None;
+    }
+    Some((case_name, subcase_name))
+}
+
+fn apply_grouped_qemu_case_filter(
+    cases: &mut [StarryQemuCase],
+    filter: &qemu_test::GroupedQemuCaseFilter,
+    group: &str,
+) -> anyhow::Result<()> {
+    if filter.is_empty() {
+        return Ok(());
+    }
+    if cases.len() != 1 {
+        bail!(
+            "grouped qemu --subcase/--test-command filters require exactly one selected case; \
+             matched {} cases",
+            cases.len()
+        );
+    }
+
+    let case = &mut cases[0].case;
+    qemu_test::filter_grouped_qemu_case(case, filter, "Starry", group)?;
+    println!(
+        "filtered grouped qemu case `{}`: subcases [{}], commands [{}]",
+        case.name,
+        filtered_subcase_summary(case),
+        case.test_commands.join(", ")
+    );
+    Ok(())
+}
+
+fn filtered_subcase_summary(case: &TestQemuCase) -> String {
+    if case.subcases.is_empty() {
+        return "<none>".to_string();
+    }
+    case.subcases
+        .iter()
+        .map(|subcase| subcase.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 impl Starry {
     pub(super) async fn test_qemu(&mut self, args: ArgsTestQemu) -> anyhow::Result<()> {
+        let explicit_grouped_filter = qemu_test::GroupedQemuCaseFilter {
+            subcases: args.subcases.clone(),
+            test_commands: args.test_commands.clone(),
+        };
+        if args.list
+            && !explicit_grouped_filter.is_empty()
+            && args.arch.is_none()
+            && args.target.is_none()
+        {
+            bail!(
+                "grouped qemu --subcase/--test-command filters with --list require --arch or \
+                 --target"
+            );
+        }
+        if !explicit_grouped_filter.is_empty() && args.test_case.is_none() {
+            bail!("grouped qemu --subcase/--test-command filters require --test-case");
+        }
+
         if args.list
             && args.arch.is_none()
             && args.target.is_none()
@@ -483,13 +590,19 @@ impl Starry {
         let test_group = resolve_qemu_test_group_name(args.test_group.as_deref(), args.stress)?;
         let (arch, target) =
             parse_test_target(self.app.workspace_root(), &args.arch, &args.target)?;
-        let cases = discover_qemu_cases(
+        let (mut cases, shorthand_subcase) = discover_qemu_cases_with_grouped_shorthand(
             self.app.workspace_root(),
             &arch,
             &target,
             args.test_case.as_deref(),
             &test_group,
+            &explicit_grouped_filter,
         )?;
+        let mut grouped_filter = explicit_grouped_filter.clone();
+        if let Some(subcase) = shorthand_subcase {
+            grouped_filter.subcases.push(subcase);
+        }
+        apply_grouped_qemu_case_filter(&mut cases, &grouped_filter, &test_group)?;
         if args.list {
             let case_names = cases.iter().map(|case| case.case.name.as_str());
             println!("{}", qemu_test::render_case_tree(&test_group, case_names));
@@ -1256,6 +1369,19 @@ mod tests {
             rootfs_path: PathBuf::from("/tmp/rootfs.img"),
             requirements: StarryQemuCaseRequirements { smp: 1 },
         }
+    }
+
+    #[test]
+    fn grouped_case_shorthand_splits_at_last_path_component() {
+        assert_eq!(
+            split_grouped_case_shorthand("bugfix/bug-nginx-fioasync"),
+            Some(("bugfix", "bug-nginx-fioasync"))
+        );
+        assert_eq!(
+            split_grouped_case_shorthand("qemu-smp1/syscall/test_ioctl_fionbio_int"),
+            Some(("qemu-smp1/syscall", "test_ioctl_fionbio_int"))
+        );
+        assert_eq!(split_grouped_case_shorthand("syscall"), None);
     }
 
     #[test]

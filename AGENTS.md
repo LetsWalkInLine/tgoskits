@@ -29,6 +29,11 @@
 
 - CI order is `fmt` first, then `cargo xtask clippy`, then tests (`cargo xtask test` and OS-specific xtask tests).
 - Use focused test commands first (single package/single case), then broader suites only as needed.
+- For StarryOS grouped QEMU cases such as `bugfix` and `syscall`, avoid running the full group during normal iteration. Prefer targeted subcase commands, for example:
+  - `cargo xtask starry test qemu --arch x86_64 -g normal -c bugfix --subcase bug-nginx-fioasync`
+  - `cargo xtask starry test qemu --arch x86_64 -g normal -c syscall --subcase test_ioctl_fionbio_int`
+  - Shorthand is also supported: `cargo xtask starry test qemu --arch x86_64 -g normal -c syscall/test_ioctl_fionbio_int`
+- Run full grouped cases such as `-c bugfix` or `-c syscall` only for final sweeps or when broad regression coverage is explicitly needed.
 
 ## High-Value Skills In This Repo
 
