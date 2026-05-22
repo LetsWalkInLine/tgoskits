@@ -35,16 +35,33 @@
   - Shorthand is also supported: `cargo xtask starry test qemu --arch x86_64 -g normal -c syscall/test_ioctl_fionbio_int`
 - Run full grouped cases such as `-c bugfix` or `-c syscall` only for final sweeps or when broad regression coverage is explicitly needed.
 
-## High-Value Skills In This Repo
+## Project Skills
 
-- `update-std-tests`: for `scripts/test/std_crates.csv` audits/updates.
-- `starry-test-suit`: for `test-suit/starryos` case/group/config updates.
-- `cross-kernel-driver`: for driver work under `drivers/`.
-- `review-open-prs`: for repository PR review tasks.
-- `board-uboot-fsck-repair`: for OrangePi-5-Plus ext4 fsck recovery flow.
+- `update-std-tests` (`.claude/skills/update-std-tests/SKILL.md`): use for `scripts/test/std_crates.csv` audits/updates, workspace-vs-whitelist comparisons, and new std-test candidates.
+- `starry-test-suit` (`.claude/skills/starry-test-suit/SKILL.md`): use for `test-suit/starryos` cases/configs, `qemu-*.toml`, grouping, success/fail regexes, and Starry test-suit CI behavior.
+- `cross-kernel-driver` (`.claude/skills/cross-kernel-driver/SKILL.md`): use for portable Rust driver work under `drivers/`, including layer boundaries, MMIO/DMA handling, IRQ/queue contracts, and OS API coupling audits.
+- `review-open-prs` (`.claude/skills/review-open-prs/SKILL.md`): use for auditing or reviewing all open PRs, re-reviewing updated PRs, running validation, and submitting approve/request-changes reviews.
+- `review-single-pr` (`.claude/skills/review-single-pr/SKILL.md`): use for focused review of one PR number/URL, overlap/conflict/app-support checks, local validation, Chinese inline comments, and final review submission.
+- `reassign-pr-reviewers` (`.claude/skills/reassign-pr-reviewers/SKILL.md`): use for assigning or rebalancing `rcore-os/tgoskits` PR reviewers while preserving bot requests and permission limits.
+- `board-uboot-fsck-repair` (`.claude/skills/board-uboot-fsck-repair/SKILL.md`): use for physical-board ext4 recovery through U-Boot, OrangePi-5-Plus `extraboardargs=fsckfix`, and Linux fsck/boot checks around Starry board write tests.
+- `crates-io-owner` (`.claude/skills/crates-io-owner/SKILL.md`): use for adding/verifying `github:rcore-os:crates-io` ownership for branch-added crates or explicitly requested `cargo owner` checks.
 
 ## PR/Communication Conventions
 
 - Keep PR/issues/review text neutral and project-focused.
 - Use Conventional Commits title style: `type(scope): content`.
 - Do not add agent/AI branding text in commits, PRs, or issue comments.
+
+## Additional Upstream Requirements
+
+- When changing logic, run a relevant `cargo clippy` check after the code change, using the container workflow above.
+- After modifying a crate, ensure that crate passes clippy. Prefer `cargo xtask clippy --package <crate>` for targeted verification.
+- Run `cargo fmt` after code edits, using the container workflow above.
+- If `cargo xtask` cannot satisfy a special configuration, inspect the `xtask` flow first and only then fall back to native Cargo commands with manually matched arguments.
+- For PR titles, follow `type(scope): content` in Conventional Commits style. Prefer the main affected crate name as `scope` when one crate clearly dominates the change; for cross-cutting or infrastructure work, broader scopes such as `ci`, `repo`, or `docs` are acceptable.
+- PR title examples: `feat(axbuild): add Starry remote board test flow`, `fix(starry-process): correct tty session cleanup`, `chore(ci): split Starry self-hosted board matrix`.
+- When submitting a PR, write the title in English and the body in Chinese.
+- PR descriptions must clearly cover: the problem being solved, what was changed to solve it, and the logic behind each step of the solution.
+- Before submitting a PR, locally validate the CI flow as much as practical, excluding only physical board tests and self-hosted test flows unless the user explicitly asks to run them. Changes unrelated to building or testing, such as documentation-only updates, do not require local CI validation.
+- After adding or changing commits on a PR branch, update the PR description so it stays synchronized with the committed changes.
+- Do not insert agent-related labels, signatures, branding, or other advertisement-style wording such as `codex`, `agent`, `AI`, or similar self-promotional tags unless the user explicitly requests it.
