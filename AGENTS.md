@@ -52,6 +52,14 @@
 - Use Conventional Commits title style: `type(scope): content`.
 - Do not add agent/AI branding text in commits, PRs, or issue comments.
 
+## Worklog
+
+- Only write a worklog when the user explicitly asks for it.
+- Store worklogs under `target/worklog`.
+- Write worklogs in Chinese, using short `- ` bullet points in chronological order.
+- Keep entries concise: one or two sentences per key milestone, covering important findings, decisions, commands/results, blockers, and follow-up state.
+- Use the style of prior logs under `target/worklog` as reference, but do not assume that directory exists.
+
 ## Additional Upstream Requirements
 
 - When changing logic, run a relevant `cargo clippy` check after the code change, using the container workflow above.
