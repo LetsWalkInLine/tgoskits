@@ -46,6 +46,14 @@
 - `board-uboot-fsck-repair` (`.claude/skills/board-uboot-fsck-repair/SKILL.md`): use for physical-board ext4 recovery through U-Boot, OrangePi-5-Plus `extraboardargs=fsckfix`, and Linux fsck/boot checks around Starry board write tests.
 - `crates-io-owner` (`.claude/skills/crates-io-owner/SKILL.md`): use for adding/verifying `github:rcore-os:crates-io` ownership for branch-added crates or explicitly requested `cargo owner` checks.
 
+## Research Sources
+
+- When researching a work direction, check relevant public sources for duplicate, conflicting, competing, or helpful work before implementation or PR submission.
+- Use the OpenCamp StarryOS project page (`https://opencamp.cn/os2edu/camp/2026spring/stage/7`) for training-camp directions, requirements, and notices.
+- Use GitHub discussion #228 (`https://github.com/rcore-os/tgoskits/discussions/228`) for StarryOS Debian direction status and references.
+- Use the Tencent Docs claim sheet (`https://docs.qq.com/sheet/DRkttQ1FaSUtvREdQ?tab=BB08J2`) for software ownership/claim status; if automated access cannot read table cells, open/export it with browser login and state the access limit.
+- Use the upstream repo (`https://github.com/rcore-os/tgoskits`) by searching issues, PRs, and discussions; GitHub web search or API search are preferred for current status checks.
+
 ## PR/Communication Conventions
 
 - Keep PR/issues/review text neutral and project-focused.
