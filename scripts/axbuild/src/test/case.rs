@@ -51,6 +51,7 @@ pub(crate) struct TestQemuCase {
     pub(crate) case_dir: PathBuf,
     pub(crate) qemu_config_path: PathBuf,
     pub(crate) test_commands: Vec<String>,
+    pub(crate) host_symbolize_success_regex: Vec<String>,
     pub(crate) subcases: Vec<TestQemuSubcase>,
 }
 
@@ -77,6 +78,7 @@ pub(crate) struct TestQemuSubcase {
 pub(crate) struct GroupedCaseRunnerConfig {
     pub(crate) runner_name: String,
     pub(crate) runner_path: String,
+    pub(crate) autorun_profile_script: Option<String>,
     pub(crate) begin_marker: String,
     pub(crate) passed_marker: String,
     pub(crate) failed_marker: String,
@@ -609,6 +611,9 @@ fn case_asset_cache_key(
     if pipeline == CasePipeline::Rust {
         hash_token(&mut hasher, RUST_PIPELINE_CACHE_VERSION);
     }
+    if pipeline == CasePipeline::Grouped {
+        hash_grouped_runner_config(&mut hasher, &config.grouped_runner);
+    }
 
     hash_rootfs_fingerprint(&mut hasher, shared_rootfs)?;
     hash_tree(&mut hasher, &case.case_dir)?;
@@ -617,6 +622,25 @@ fn case_asset_cache_key(
     }
 
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn hash_grouped_runner_config(hasher: &mut Sha256, config: &GroupedCaseRunnerConfig) {
+    hash_token(hasher, &config.runner_name);
+    hash_token(hasher, &config.runner_path);
+    match &config.autorun_profile_script {
+        Some(script_name) => {
+            hash_token(hasher, "autorun_profile_script");
+            hash_token(hasher, script_name);
+        }
+        None => hash_token(hasher, "no_autorun_profile_script"),
+    }
+    hash_token(hasher, &config.begin_marker);
+    hash_token(hasher, &config.passed_marker);
+    hash_token(hasher, &config.failed_marker);
+    hash_token(hasher, &config.all_passed_marker);
+    hash_token(hasher, &config.all_failed_marker);
+    hash_token(hasher, &config.success_regex);
+    hash_token(hasher, &config.fail_regex);
 }
 
 fn hash_tree(hasher: &mut Sha256, root: &Path) -> anyhow::Result<()> {
@@ -712,7 +736,7 @@ pub(crate) fn apply_grouped_qemu_config(
         return;
     }
 
-    qemu.shell_init_cmd = Some(config.runner_path.clone());
+    qemu.shell_init_cmd = Some(grouped_runner_shell_init_cmd(config));
     qemu.success_regex = vec![config.success_regex.clone()];
     if !qemu
         .fail_regex
@@ -723,10 +747,20 @@ pub(crate) fn apply_grouped_qemu_config(
     }
 }
 
+fn grouped_runner_shell_init_cmd(config: &GroupedCaseRunnerConfig) -> String {
+    let runner = shell_single_quote(&config.runner_path);
+    if config.autorun_profile_script.is_some() {
+        format!(r#"[ "${{AXBUILD_GROUPED_AUTORUN_DONE:-0}}" = "1" ] || {runner}"#)
+    } else {
+        config.runner_path.clone()
+    }
+}
+
 pub(crate) async fn run_qemu_with_prepared_case_assets(
     app: &mut AppContext,
     cargo: &Cargo,
     qemu: QemuConfig,
+    capture_backtrace: Option<crate::backtrace::BacktraceQemuCapture>,
     qemu_config_path: &Path,
     prepared_assets: PreparedCaseAssets,
     prepare_elapsed: Duration,
@@ -749,7 +783,7 @@ pub(crate) async fn run_qemu_with_prepared_case_assets(
     println!("  rootfs: {}", prepared_assets.rootfs_path.display());
 
     let qemu_started = std::time::Instant::now();
-    let result = app.run_qemu(cargo, qemu, None).await;
+    let result = app.run_qemu(cargo, qemu, capture_backtrace).await;
     println!("  qemu run: {:.2?}", qemu_started.elapsed());
 
     remove_case_rootfs_copy(prepared_assets.rootfs_copy_to_remove.as_deref());
@@ -792,7 +826,37 @@ pub(crate) fn write_grouped_case_runner_script(
          '%s\\n' {all_failed}\nexit 1\n"
     ));
 
-    write_executable_script(&runner_path, &body)
+    write_executable_script(&runner_path, &body)?;
+    if let Some(script_name) = &config.autorun_profile_script {
+        write_grouped_case_autorun_profile_script(overlay_dir, script_name, &config.runner_path)?;
+    }
+    Ok(())
+}
+
+fn write_grouped_case_autorun_profile_script(
+    overlay_dir: &Path,
+    script_name: &str,
+    runner_path: &str,
+) -> anyhow::Result<()> {
+    ensure!(
+        !script_name.is_empty() && !script_name.contains('/') && script_name.ends_with(".sh"),
+        "invalid grouped qemu autorun profile script name `{script_name}`"
+    );
+
+    let dest_dir = overlay_dir.join("etc/profile.d");
+    fs::create_dir_all(&dest_dir)
+        .with_context(|| format!("failed to create {}", dest_dir.display()))?;
+    let script_path = dest_dir.join(script_name);
+    let runner = shell_single_quote(runner_path);
+    let body = format!(
+        "case \"$-\" in\n\t*i*) ;;\n\t*) return 0 2>/dev/null || exit 0 ;;\nesac\n\nif [ \
+         \"${{AXBUILD_GROUPED_AUTORUN_DONE:-0}}\" = \"1\" ]; then\n\treturn 0 2>/dev/null || exit \
+         0\nfi\nexport AXBUILD_GROUPED_AUTORUN_DONE=1\n\nif [ -x {runner} ]; \
+         then\n\t{runner}\nfi\n"
+    );
+    fs::write(&script_path, body)
+        .with_context(|| format!("failed to write {}", script_path.display()))?;
+    make_executable(&script_path)
 }
 
 /// Prepares overlay assets for a shell-based QEMU test case.
@@ -922,6 +986,7 @@ mod tests {
             grouped_runner: GroupedCaseRunnerConfig {
                 runner_name: "suite-run-case-tests".to_string(),
                 runner_path: "/usr/bin/suite-run-case-tests".to_string(),
+                autorun_profile_script: None,
                 begin_marker: "SUITE_GROUPED_TEST_BEGIN".to_string(),
                 passed_marker: "SUITE_GROUPED_TEST_PASSED".to_string(),
                 failed_marker: "SUITE_GROUPED_TEST_FAILED".to_string(),
@@ -953,6 +1018,7 @@ mod tests {
             case_dir: case_dir.clone(),
             qemu_config_path: case_dir.join("qemu-aarch64.toml"),
             test_commands: Vec::new(),
+            host_symbolize_success_regex: Vec::new(),
             subcases: Vec::new(),
         }
     }
@@ -1018,63 +1084,68 @@ mod tests {
     }
 
     #[test]
-    fn grouped_case_asset_cache_key_includes_filtered_commands_and_subcases() {
+    fn grouped_runner_can_install_interactive_profile_autorun() {
+        let root = tempdir().unwrap();
+        let overlay = root.path().join("overlay");
+        let commands = vec!["/usr/bin/alpha".to_string()];
+        let mut config = fake_config();
+        config.grouped_runner.autorun_profile_script = Some("99-suite-run-case-tests.sh".into());
+
+        write_grouped_case_runner_script(&overlay, &commands, &config.grouped_runner).unwrap();
+
+        let profile = overlay.join("etc/profile.d/99-suite-run-case-tests.sh");
+        let content = fs::read_to_string(&profile).unwrap();
+        assert!(content.contains("case \"$-\" in"));
+        assert!(content.contains("AXBUILD_GROUPED_AUTORUN_DONE"));
+        assert!(content.contains("/usr/bin/suite-run-case-tests"));
+        assert!(!content.contains("set -u"));
+    }
+
+    #[test]
+    fn grouped_runner_shell_init_skips_when_profile_autorun_already_ran() {
+        let mut config = fake_config();
+        config.grouped_runner.autorun_profile_script = Some("99-suite-run-case-tests.sh".into());
+        let mut qemu = QemuConfig::default();
+        let mut case = fake_case(tempdir().unwrap().path(), "grouped");
+        case.test_commands = vec!["/usr/bin/alpha".to_string()];
+
+        apply_grouped_qemu_config(&mut qemu, &case, &config.grouped_runner);
+
+        let command = qemu.shell_init_cmd.as_deref().unwrap();
+        assert!(command.contains("AXBUILD_GROUPED_AUTORUN_DONE"));
+        assert!(command.contains("/usr/bin/suite-run-case-tests"));
+    }
+
+    #[test]
+    fn grouped_cache_key_tracks_runner_autorun_config() {
         let root = tempdir().unwrap();
         let shared_img = root.path().join("rootfs.img");
         fs::write(&shared_img, b"rootfs").unwrap();
+        let case = fake_case(root.path(), "grouped");
+        let mut config = fake_config();
 
-        let mut case = fake_case(root.path(), "grouped");
-        let subcase_dir = case.case_dir.join("alpha");
-        fs::create_dir_all(&subcase_dir).unwrap();
-        case.test_commands = vec!["/usr/bin/alpha".to_string()];
-        case.subcases = vec![TestQemuSubcase {
-            name: "alpha".to_string(),
-            case_dir: subcase_dir,
-            kind: TestQemuSubcaseKind::C,
-        }];
-
-        let layout =
-            case_asset_layout(root.path(), "x86_64-unknown-none", &case.display_name).unwrap();
-        let alpha_key = case_asset_cache_key(
+        let without_autorun = case_asset_cache_key(
             "x86_64",
             "x86_64-unknown-none",
             CasePipeline::Grouped,
             &case,
             &shared_img,
-            &fake_config(),
+            &config,
         )
         .unwrap();
 
-        case.test_commands = vec!["/usr/bin/beta".to_string()];
-        let beta_command_key = case_asset_cache_key(
+        config.grouped_runner.autorun_profile_script = Some("99-suite-run-case-tests.sh".into());
+        let with_autorun = case_asset_cache_key(
             "x86_64",
             "x86_64-unknown-none",
             CasePipeline::Grouped,
             &case,
             &shared_img,
-            &fake_config(),
+            &config,
         )
         .unwrap();
 
-        case.test_commands = vec!["/usr/bin/alpha".to_string()];
-        case.subcases.clear();
-        let no_subcase_key = case_asset_cache_key(
-            "x86_64",
-            "x86_64-unknown-none",
-            CasePipeline::Grouped,
-            &case,
-            &shared_img,
-            &fake_config(),
-        )
-        .unwrap();
-
-        assert_eq!(
-            layout.work_dir,
-            root.path()
-                .join("target/x86_64-unknown-none/qemu-cases/grouped")
-        );
-        assert_ne!(alpha_key, beta_command_key);
-        assert_ne!(alpha_key, no_subcase_key);
+        assert_ne!(without_autorun, with_autorun);
     }
 
     #[test]

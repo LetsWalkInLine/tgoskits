@@ -110,18 +110,8 @@ struct IndexedQemuCase {
 struct QemuCaseExtraConfig {
     #[serde(default)]
     test_commands: Vec<String>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct GroupedQemuCaseFilter {
-    pub(crate) subcases: Vec<String>,
-    pub(crate) test_commands: Vec<String>,
-}
-
-impl GroupedQemuCaseFilter {
-    pub(crate) fn is_empty(&self) -> bool {
-        self.subcases.is_empty() && self.test_commands.is_empty()
-    }
+    #[serde(default)]
+    host_symbolize_success_regex: Vec<String>,
 }
 
 pub(crate) fn qemu_config_name(arch: &str) -> String {
@@ -725,9 +715,15 @@ pub(crate) fn load_test_qemu_case_fields(
     suite_name: &str,
     discover_subcases: bool,
 ) -> anyhow::Result<TestQemuCase> {
-    let test_commands = load_qemu_case_test_commands(&qemu_config_path, suite_name)?;
+    let config = load_qemu_case_extra_config(&qemu_config_path)?;
+    let test_commands =
+        normalize_qemu_test_commands(&qemu_config_path, config.test_commands, suite_name)?;
     let subcases = if discover_subcases && !test_commands.is_empty() {
-        discover_qemu_subcases(&case_dir)?
+        let arch = qemu_config_path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .and_then(|stem| stem.strip_prefix("qemu-"));
+        discover_qemu_subcases(&case_dir, arch)?
     } else {
         Vec::new()
     };
@@ -737,332 +733,22 @@ pub(crate) fn load_test_qemu_case_fields(
         case_dir,
         qemu_config_path,
         test_commands,
+        host_symbolize_success_regex: config.host_symbolize_success_regex,
         subcases,
     })
 }
 
-pub(crate) fn filter_grouped_qemu_case(
-    case: &mut TestQemuCase,
-    filter: &GroupedQemuCaseFilter,
-    suite_name: &str,
-    group_label: &str,
-) -> anyhow::Result<()> {
-    if filter.is_empty() {
-        return Ok(());
-    }
-    if !case.is_grouped() {
-        bail!(
-            "{suite_name} {group_label} qemu test case `{}` is not a grouped case; \
-             --subcase/--test-command can only filter cases with test_commands",
-            case.name
-        );
-    }
-
-    let selected_subcases = normalize_grouped_filter_values(&filter.subcases, "subcase")?;
-    let selected_commands = normalize_grouped_filter_values(&filter.test_commands, "test command")?;
-
-    let kept_commands = if selected_commands.is_empty() {
-        commands_for_subcases(case, &selected_subcases)?
-    } else {
-        filter_test_commands(case, &selected_commands)?
-    };
-    let kept_subcases = if selected_subcases.is_empty() {
-        infer_subcases_for_commands(case, &kept_commands)?
-    } else {
-        filter_subcases(case, &selected_subcases)?
-    };
-
-    if !case.subcases.is_empty() && kept_subcases.is_empty() {
-        bail!(
-            "{suite_name} {group_label} grouped qemu case `{}` filter selected no buildable \
-             subcases; available subcases: {}",
-            case.name,
-            available_subcases(case)
-        );
-    }
-    if kept_commands.is_empty() {
-        bail!(
-            "{suite_name} {group_label} grouped qemu case `{}` filter selected no test commands; \
-             available commands: {}",
-            case.name,
-            available_test_commands(case)
-        );
-    }
-
-    case.subcases = kept_subcases;
-    case.test_commands = kept_commands;
-    Ok(())
-}
-
-fn normalize_grouped_filter_values(values: &[String], label: &str) -> anyhow::Result<Vec<String>> {
-    let mut normalized = Vec::new();
-    let mut seen = BTreeSet::new();
-    for value in values {
-        let value = value.trim();
-        if value.is_empty() {
-            bail!("grouped qemu {label} filter contains an empty selector");
-        }
-        if label == "subcase" {
-            validate_grouped_subcase_selector(value)?;
-        }
-        if seen.insert(value.to_string()) {
-            normalized.push(value.to_string());
-        }
-    }
-    Ok(normalized)
-}
-
-fn validate_grouped_subcase_selector(value: &str) -> anyhow::Result<()> {
-    if value == "." || value == ".." || value.contains('/') || value.contains('\\') {
-        bail!(
-            "invalid grouped qemu subcase selector `{value}`; expected an immediate subcase \
-             directory name"
-        );
-    }
-    Ok(())
-}
-
-fn filter_subcases(
-    case: &TestQemuCase,
-    selectors: &[String],
-) -> anyhow::Result<Vec<TestQemuSubcase>> {
-    if selectors.is_empty() {
-        return Ok(case.subcases.clone());
-    }
-
-    let mut missing = Vec::new();
-    for selector in selectors {
-        if !case
-            .subcases
-            .iter()
-            .any(|subcase| subcase_matches_selector(subcase, selector))
-        {
-            missing.push(selector.as_str());
-        }
-    }
-    if !missing.is_empty() {
-        bail!(
-            "unknown grouped qemu subcase selector(s) for `{}`: {}; available subcases: {}",
-            case.name,
-            missing.join(", "),
-            available_subcases(case)
-        );
-    }
-
-    Ok(case
-        .subcases
-        .iter()
-        .filter(|subcase| {
-            selectors
-                .iter()
-                .any(|selector| subcase_matches_selector(subcase, selector))
-        })
-        .cloned()
-        .collect())
-}
-
-fn filter_test_commands(case: &TestQemuCase, selectors: &[String]) -> anyhow::Result<Vec<String>> {
-    if selectors.is_empty() {
-        return Ok(case.test_commands.clone());
-    }
-
-    let mut missing = Vec::new();
-    for selector in selectors {
-        if !case
-            .test_commands
-            .iter()
-            .any(|command| test_command_matches_selector(command, selector))
-        {
-            missing.push(selector.as_str());
-        }
-    }
-    if !missing.is_empty() {
-        bail!(
-            "unknown grouped qemu test command selector(s) for `{}`: {}; available commands: {}",
-            case.name,
-            missing.join(", "),
-            available_test_commands(case)
-        );
-    }
-
-    Ok(case
-        .test_commands
-        .iter()
-        .filter(|command| {
-            selectors
-                .iter()
-                .any(|selector| test_command_matches_selector(command, selector))
-        })
-        .cloned()
-        .collect())
-}
-
-fn commands_for_subcases(
-    case: &TestQemuCase,
-    selected_subcases: &[String],
-) -> anyhow::Result<Vec<String>> {
-    if selected_subcases.is_empty() {
-        return Ok(case.test_commands.clone());
-    }
-
-    let selected = filter_subcases(case, selected_subcases)?;
-    let mut missing = Vec::new();
-    for subcase in &selected {
-        if !case
-            .test_commands
-            .iter()
-            .any(|command| subcase_matches_command(subcase, command))
-        {
-            missing.push(subcase.name.as_str());
-        }
-    }
-    if !missing.is_empty() {
-        bail!(
-            "could not infer grouped qemu test command(s) for subcase selector(s) in `{}`: {}; \
-             pass --test-command explicitly. Available commands: {}",
-            case.name,
-            missing.join(", "),
-            available_test_commands(case)
-        );
-    }
-
-    Ok(case
-        .test_commands
-        .iter()
-        .filter(|command| {
-            selected
-                .iter()
-                .any(|subcase| subcase_matches_command(subcase, command))
-        })
-        .cloned()
-        .collect())
-}
-
-fn infer_subcases_for_commands(
-    case: &TestQemuCase,
-    selected_commands: &[String],
-) -> anyhow::Result<Vec<TestQemuSubcase>> {
-    if case.subcases.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let mut missing = Vec::new();
-    for command in selected_commands {
-        if !case
-            .subcases
-            .iter()
-            .any(|subcase| subcase_matches_command(subcase, command))
-        {
-            missing.push(command.as_str());
-        }
-    }
-    if !missing.is_empty() {
-        bail!(
-            "could not infer grouped qemu subcase(s) for command selector(s) in `{}`: {}; pass \
-             --subcase explicitly. Available subcases: {}",
-            case.name,
-            missing.join(", "),
-            available_subcases(case)
-        );
-    }
-
-    Ok(case
-        .subcases
-        .iter()
-        .filter(|subcase| {
-            selected_commands
-                .iter()
-                .any(|command| subcase_matches_command(subcase, command))
-        })
-        .cloned()
-        .collect())
-}
-
-fn subcase_matches_selector(subcase: &TestQemuSubcase, selector: &str) -> bool {
-    subcase.name == selector
-        || normalized_command_name(&subcase.name) == normalized_command_name(selector)
-}
-
-fn subcase_matches_command(subcase: &TestQemuSubcase, command: &str) -> bool {
-    let Some(basename) = command_basename(command) else {
-        return false;
-    };
-    subcase.name == basename
-        || normalized_command_name(&subcase.name) == normalized_command_name(basename)
-}
-
-fn test_command_matches_selector(command: &str, selector: &str) -> bool {
-    if command == selector {
-        return true;
-    }
-
-    let command_exec = command_executable(command);
-    let selector_exec = command_executable(selector);
-    if command_exec == selector_exec {
-        return true;
-    }
-
-    match (
-        basename_from_executable(command_exec),
-        basename_from_executable(selector_exec),
-    ) {
-        (Some(command_base), Some(selector_base)) => {
-            command_base == selector_base
-                || normalized_command_name(command_base) == normalized_command_name(selector_base)
-        }
-        _ => false,
-    }
-}
-
-fn command_basename(command: &str) -> Option<&str> {
-    basename_from_executable(command_executable(command))
-}
-
-fn command_executable(command: &str) -> &str {
-    command.split_whitespace().next().unwrap_or(command)
-}
-
-fn basename_from_executable(executable: &str) -> Option<&str> {
-    Path::new(executable)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
-}
-
-fn normalized_command_name(name: &str) -> String {
-    name.replace('-', "_")
-}
-
-fn available_subcases(case: &TestQemuCase) -> String {
-    if case.subcases.is_empty() {
-        return "<none>".to_string();
-    }
-    case.subcases
-        .iter()
-        .map(|subcase| subcase.name.as_str())
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-fn available_test_commands(case: &TestQemuCase) -> String {
-    if case.test_commands.is_empty() {
-        return "<none>".to_string();
-    }
-    case.test_commands.join(", ")
-}
-
-fn load_qemu_case_test_commands(
-    qemu_config_path: &Path,
-    suite_name: &str,
-) -> anyhow::Result<Vec<String>> {
+fn load_qemu_case_extra_config(qemu_config_path: &Path) -> anyhow::Result<QemuCaseExtraConfig> {
     let content = fs::read_to_string(qemu_config_path)
         .with_context(|| format!("failed to read {}", qemu_config_path.display()))?;
-    let config: QemuCaseExtraConfig = toml::from_str(&content)
-        .with_context(|| format!("failed to parse {}", qemu_config_path.display()))?;
-    normalize_qemu_test_commands(qemu_config_path, config.test_commands, suite_name)
+    toml::from_str(&content)
+        .with_context(|| format!("failed to parse {}", qemu_config_path.display()))
 }
 
-fn discover_qemu_subcases(case_dir: &Path) -> anyhow::Result<Vec<TestQemuSubcase>> {
+fn discover_qemu_subcases(
+    case_dir: &Path,
+    arch: Option<&str>,
+) -> anyhow::Result<Vec<TestQemuSubcase>> {
     let mut subcases = Vec::new();
     for entry in
         fs::read_dir(case_dir).with_context(|| format!("failed to read {}", case_dir.display()))?
@@ -1070,6 +756,13 @@ fn discover_qemu_subcases(case_dir: &Path) -> anyhow::Result<Vec<TestQemuSubcase
         let entry = entry?;
         let path = entry.path();
         if !path.is_dir() {
+            continue;
+        }
+
+        if let Some(arch) = arch
+            && let Some(configs) = qemu_configs_in_dir(&path)?
+            && !configs.contains_key(arch)
+        {
             continue;
         }
 
