@@ -14,7 +14,7 @@ use alloc::{boxed::Box, collections::BTreeMap, string::String, sync::Arc, vec::V
 use core::{
     cell::RefCell,
     ops::Deref,
-    sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, AtomicUsize, Ordering},
 };
 
 use ax_runtime::hal::{cpu::uspace::UserContext, time::TimeValue};
@@ -574,8 +574,6 @@ impl ProcessImage {
 pub struct ProcessData {
     /// The process.
     pub proc: Arc<Process>,
-    /// Current cgroup v2 membership in the global hierarchy.
-    cgroup_id: AtomicU64,
     /// The executable path
     pub exe_path: RwLock<String>,
     /// The command line arguments
@@ -782,7 +780,6 @@ impl ProcessData {
     ) -> Arc<Self> {
         let this = Arc::new(Self {
             proc,
-            cgroup_id: AtomicU64::new(crate::cgroup::root_id()),
             exe_path: RwLock::new(image.exe_path),
             cmdline: RwLock::new(image.cmdline),
             auxv: RwLock::new(image.auxv),
@@ -852,18 +849,7 @@ impl ProcessData {
         // expression would nest a sleepable lock inside atomic context.
         let aspace_arc = this.aspace.lock().clone();
         crate::mm::attach_process_slot(&aspace_arc);
-        crate::cgroup::register_process(crate::cgroup::root_id());
         this
-    }
-
-    /// Return the current cgroup v2 membership id.
-    pub fn cgroup_id(&self) -> crate::cgroup::CgroupId {
-        self.cgroup_id.load(Ordering::Acquire)
-    }
-
-    /// Update cgroup membership. This is serialized by the cgroup core lock.
-    pub(crate) fn set_cgroup_id(&self, id: crate::cgroup::CgroupId) {
-        self.cgroup_id.store(id, Ordering::Release);
     }
 
     /// Whether this process shares its VM address space (`CLONE_VM`).
@@ -1832,7 +1818,6 @@ impl ProcessData {
 
 impl Drop for ProcessData {
     fn drop(&mut self) {
-        crate::cgroup::unregister_process(self.cgroup_id());
         self.release_aspace_slot_if_needed();
     }
 }

@@ -859,7 +859,6 @@ impl SimpleDirOps for ThreadDir {
                 "mounts",
                 "cmdline",
                 "comm",
-                "cgroup",
                 "exe",
                 "fd",
                 "uid_map",
@@ -1015,13 +1014,6 @@ impl SimpleDirOps for ThreadDir {
                 }),
             )
             .into(),
-            "cgroup" => {
-                let proc_data = task.as_thread().proc_data.clone();
-                SimpleFile::new_regular(fs, move || {
-                    Ok(crate::cgroup::proc_cgroup_text(&proc_data)?.into_bytes())
-                })
-                .into()
-            }
             "exe" => SimpleFile::new(fs, NodeType::Symlink, move || {
                 Ok(task.as_thread().proc_data.exe_path.read().clone())
             })

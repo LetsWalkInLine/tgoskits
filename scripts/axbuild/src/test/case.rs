@@ -701,21 +701,6 @@ fn case_asset_cache_key(
     hash_token(&mut hasher, target);
     hash_token(&mut hasher, case.display_name.as_str());
     hash_token(&mut hasher, pipeline.as_str());
-    hash_token(&mut hasher, "test-commands");
-    for command in &case.test_commands {
-        hash_token(&mut hasher, command);
-    }
-    hash_token(&mut hasher, "subcases");
-    for subcase in &case.subcases {
-        hash_token(&mut hasher, &subcase.name);
-        hash_token(
-            &mut hasher,
-            match subcase.kind {
-                TestQemuSubcaseKind::C => "c",
-                TestQemuSubcaseKind::Rust => "rust",
-            },
-        );
-    }
     for var in &config.cache_env_vars {
         hash_token(&mut hasher, var);
         hash_token(&mut hasher, std::env::var(var).unwrap_or_default().as_str());
