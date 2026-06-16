@@ -2,7 +2,13 @@ services:
   tgoskits:
     image: tgoskits-env
     working_dir: /workspace
+    environment:
+      CARGO_TARGET_DIR: /workspace/target
     volumes:
       - .:/workspace
+      - tgoskits-target:/workspace/target
     stdin_open: true
     tty: true
+
+volumes:
+  tgoskits-target:
