@@ -44,9 +44,9 @@ flowchart TD
 
     subgraph Platform["平台层"]
         direction LR
-        P1["riscv64-qemu-virt"]
-        P2["x86-qemu-q35"]
-        P3["axplat-dyn"]
+        P1["axplat-dyn"]
+        P2["LoongArch static platform"]
+        P3["RISC-V board platforms"]
     end
 
     Components --> ArceOS
@@ -70,7 +70,7 @@ ArceOS 是组件化 Unikernel，同时充当三个角色：独立运行时、示
 - 17 个内核模块（`os/arceos/modules/`）
 - 3 个 API crate（`os/arceos/api/`）
 - 2 个用户库（`os/arceos/ulib/`）
-- 8 个示例应用（`os/arceos/examples/`）
+- 9 个 Rust std 应用（`apps/arceos/`）
 
 → 详细架构见 [ArceOS 架构](./arceos)
 
@@ -117,7 +117,7 @@ TGOSKits 按职责将 crate 组织为六个核心层次和一个辅助层，每�
 
 辅助层：
 
-- `platforms/` — 平台实现，当前包含 `riscv64-qemu-virt`、`x86-qemu-q35`、`axplat-dyn`
+- `platforms/` — 平台实现，当前包含 `axplat-dyn` 和保留的 RISC-V / LoongArch 板级静态平台
 - `drivers/` — SoC 专用驱动（blk、net、npu、pci、soc）
 - `test-suit/` — 系统级测试入口（ArceOS、StarryOS、Axvisor）
 

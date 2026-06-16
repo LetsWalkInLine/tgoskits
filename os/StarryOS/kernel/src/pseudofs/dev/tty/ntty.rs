@@ -1,14 +1,12 @@
 use alloc::sync::Arc;
+use core::ptr::NonNull;
 
 use axpoll::PollSet;
 use spin::LazyLock;
 
 use super::{
     Tty,
-    terminal::{
-        WindowSize,
-        ldisc::{ProcessMode, TtyConfig, TtyRead, TtyWrite},
-    },
+    terminal::ldisc::{ProcessMode, TtyConfig, TtyRead, TtyWrite},
 };
 
 pub type NTtyDriver = Tty<Console, Console>;
@@ -41,18 +39,25 @@ fn handle_console_input_irq(_irq_num: usize) {
     }
 }
 
+unsafe fn handle_console_input_raw_irq(
+    ctx: ax_runtime::hal::irq::IrqContext,
+    _data: NonNull<()>,
+) -> ax_runtime::hal::irq::IrqReturn {
+    handle_console_input_irq(ctx.irq.0);
+    ax_runtime::hal::irq::IrqReturn::Handled
+}
+
 fn new_n_tty() -> Arc<NTtyDriver> {
-    // Synchronously query the connected terminal's dimensions before the
-    // poll-reader task is spawned so TIOCGWINSZ reports the real host
-    // terminal size.  TUI applications (e.g. ratatui-based clients) use the
-    // size both to lay out panels and to map mouse-event coordinates;
-    // returning a stale fallback misplaces the UI and leaves clicks/scroll
-    // outside the rendered widgets.  Falls back silently to the default
-    // 24x80 if the host terminal does not support CPR.
     let terminal = {
         let t = super::terminal::Terminal::default();
+
+        // Synchronously querying the connected terminal only works when the
+        // firmware/serial path can reliably supply a cursor-position response.
+        // Dynamic-platform QEMU tests run under ostool pipes, so keep the
+        // default 24x80 fallback there instead of stalling early Starry boot.
+        #[cfg(not(feature = "plat-dyn"))]
         if let Some((rows, cols)) = query_console_size() {
-            *t.window_size.lock() = WindowSize {
+            *t.window_size.lock() = super::terminal::WindowSize {
                 ws_row: rows,
                 ws_col: cols,
                 ws_xpixel: 0,
@@ -85,6 +90,7 @@ fn new_n_tty() -> Arc<NTtyDriver> {
 /// Called once during NTTY initialisation, before the polling reader
 /// task is spawned, so there is no concurrent consumer racing on the
 /// UART receive FIFO.
+#[cfg(not(feature = "plat-dyn"))]
 fn query_console_size() -> Option<(u16, u16)> {
     ax_runtime::hal::console::write_bytes(b"\x1b7\x1b[9999;9999H\x1b[6n\x1b8");
 
@@ -114,11 +120,12 @@ fn query_console_size() -> Option<(u16, u16)> {
         core::hint::spin_loop();
     }
 
-    if len == 0 {
-        return None;
-    }
+    parse_console_size_response(&buf[..len])
+}
 
-    let r_pos = buf[..len].iter().rposition(|&b| b == b'R')?;
+#[cfg(any(test, not(feature = "plat-dyn")))]
+fn parse_console_size_response(buf: &[u8]) -> Option<(u16, u16)> {
+    let r_pos = buf.iter().rposition(|&b| b == b'R')?;
     let escape_pos = buf[..r_pos].windows(2).rposition(|w| w == b"\x1b[")?;
     let inner = core::str::from_utf8(&buf[escape_pos + 2..r_pos]).ok()?;
     let mut parts = inner.splitn(2, ';');
@@ -132,11 +139,30 @@ fn query_console_size() -> Option<(u16, u16)> {
 
 fn console_irq_mode() -> Option<ProcessMode> {
     let irq = ax_runtime::hal::console::irq_num()?;
-    if !ax_runtime::hal::irq::register(irq, handle_console_input_irq) {
+    if ax_runtime::hal::irq::request_shared_irq(
+        irq,
+        handle_console_input_raw_irq,
+        NonNull::dangling(),
+    )
+    .is_err()
+    {
         warn!("Failed to register console IRQ handler for irq {irq}, falling back to polling mode");
         return None;
     }
 
     ax_runtime::hal::console::set_input_irq_enabled(true);
     Some(ProcessMode::InterruptDriven(CONSOLE_INPUT_SOURCE.clone()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_console_size_response;
+
+    #[test]
+    fn parses_cursor_position_response() {
+        assert_eq!(
+            parse_console_size_response(b"\x1b7\x1b[24;80R\x1b8"),
+            Some((24, 80))
+        );
+    }
 }

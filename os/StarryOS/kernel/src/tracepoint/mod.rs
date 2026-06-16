@@ -1,5 +1,6 @@
 //! See Linux Documentation for details: <https://docs.kernel.org/trace/ftrace.html>
 mod control;
+mod sched;
 mod trace;
 mod trace_pipe;
 
@@ -7,6 +8,7 @@ use alloc::{collections::BTreeMap, string::ToString, sync::Arc, vec::Vec};
 use core::{num::NonZero, ops::Deref};
 
 use ax_errno::{AxError, AxResult};
+use ax_kspin::SpinNoPreempt;
 use ax_lazyinit::LazyInit;
 use ax_memory_addr::VirtAddr;
 use ax_runtime::hal::{percpu::this_cpu_id, time::monotonic_time_nanos};
@@ -21,7 +23,36 @@ use crate::{
     task::AsThread,
 };
 
-pub type KernelExtTracePoint = Arc<Mutex<ExtTracePoint<KernelTraceAux>>>;
+// The registry entry is locked from the tracepoint fire path, which for
+// `sched:sched_switch` runs inside `axtask::switch_to` (IRQ off,
+// preemption disabled). A sleeping `ax_sync::Mutex` would trip the
+// "sleeping in atomic context" guard there, so this lock must be a
+// non-sleeping spinlock — the same kind the perf output path (`PERF_FILE`)
+// uses for exactly this reason.
+pub type KernelExtTracePoint = Arc<SpinNoPreempt<ExtTracePoint<KernelTraceAux>>>;
+
+/// Look up a registered tracepoint by its numeric id (as found in
+/// `/sys/kernel/debug/tracing/events/<subsystem>/<event>/id`).
+///
+/// Returns `None` if the id is unknown or the registry has not been
+/// initialized yet.
+pub fn lookup_ext_tracepoint(id: u32) -> Option<KernelExtTracePoint> {
+    TRACE_STATE.ext_tracepoints.get()?.get(&id).cloned()
+}
+
+/// Find a registered tracepoint by name. Returns the first `ExtTracePoint`
+/// whose underlying `TracePoint`'s name matches `name`.
+///
+/// Returns `None` if no tracepoint matches or the registry has not been
+/// initialized yet.
+pub fn find_ext_tracepoint_by_name(name: &str) -> Option<KernelExtTracePoint> {
+    for ext_tp in TRACE_STATE.ext_tracepoints.get()?.values() {
+        if ext_tp.lock().trace_point().name() == name {
+            return Some(ext_tp.clone());
+        }
+    }
+    None
+}
 
 struct TraceState {
     point_map: LazyInit<TracePointMap<KernelTraceAux>>,
@@ -216,7 +247,7 @@ pub fn tracepoint_init() -> AxResult<()> {
 
     let ext_tps = ext_tps
         .into_iter()
-        .map(|ext_tp| (ext_tp.id(), Arc::new(Mutex::new(ext_tp))))
+        .map(|ext_tp| (ext_tp.id(), Arc::new(SpinNoPreempt::new(ext_tp))))
         .collect::<BTreeMap<_, _>>();
 
     ax_println!("Initialized {} tracepoints", tp_map.len());

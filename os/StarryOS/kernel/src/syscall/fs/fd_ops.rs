@@ -1,8 +1,7 @@
 use alloc::{format, string::ToString, sync::Arc};
 use core::{
     ffi::{c_char, c_int},
-    mem,
-    ops::{Deref, DerefMut},
+    ops::DerefMut,
 };
 
 use ax_errno::{AxError, AxResult};
@@ -11,11 +10,12 @@ use ax_task::current;
 use axfs_ng_vfs::{DirEntry, FileNode, Location, NodeOps, NodeType, Reference};
 use bitflags::bitflags;
 use linux_raw_sys::general::*;
+use starry_vm::{VmMutPtr, VmPtr};
 
 use crate::{
     file::{
-        Directory, FD_TABLE, File, FileDescriptor, FileLike, Pipe, add_file_like, close_file_like,
-        get_file_like, memfd::Memfd, with_fs,
+        Directory, FD_TABLE, File, FileDescriptor, FileLike, NsFd, Pipe, add_file_like,
+        close_file_like, get_file_like, memfd::Memfd, with_fs,
     },
     mm::vm_load_string,
     pseudofs::{Device, dev::tty},
@@ -124,7 +124,6 @@ fn add_to_fd(result: OpenResult, flags: u32) -> AxResult<i32> {
                     device.inner().open(true)?;
                 }
                 let inner = device.inner().as_any();
-                #[cfg(feature = "plat-dyn")]
                 if crate::pseudofs::usbfs::is_usbfs_device(inner) {
                     let wrapped = crate::pseudofs::usbfs::open_usbfs_file(inner, file, flags)?;
                     if flags & O_NONBLOCK != 0 {
@@ -172,6 +171,56 @@ fn add_to_fd(result: OpenResult, flags: u32) -> AxResult<i32> {
         f.set_nonblocking(true)?;
     }
     add_file_like(f, flags & O_CLOEXEC != 0)
+}
+
+/// Check whether `path` refers to a `/proc/<pid>/ns/<type>` entry.
+/// If so, create an [`NsFd`] and add it to the fd table instead of
+/// opening a regular file.
+///
+/// Returns `Some(fd)` on success, `Some(Err(...))` on failure, or
+/// `None` if the path does not match (fall through to regular open).
+fn try_open_nsfd(path: &str, flags: u32) -> Option<AxResult<i32>> {
+    // Must be of the form /proc/<pid>/ns/<type>
+    if !path.starts_with("/proc/") {
+        return None;
+    }
+    let rest = path.strip_prefix("/proc/")?;
+    let (pid_str, ns_type_str) = rest.split_once("/ns/")?;
+    if pid_str.is_empty() || ns_type_str.is_empty() {
+        return None;
+    }
+    // Reject paths with extra components, e.g. /proc/1/ns/uts/extra
+    if ns_type_str.contains('/') {
+        return None;
+    }
+
+    let pid: u32 = if pid_str == "self" {
+        current().as_thread().proc_data.proc.pid()
+    } else {
+        pid_str.parse().ok()?
+    };
+
+    let proc_data = match crate::task::get_process_data(pid) {
+        Ok(p) => p,
+        Err(_) => return Some(Err(AxError::NotFound)),
+    };
+
+    let nsproxy = proc_data.nsproxy.lock();
+
+    let nsfd: NsFd = match ns_type_str {
+        "uts" => NsFd::Uts(nsproxy.uts_ns.clone()),
+        "ipc" => NsFd::Ipc(nsproxy.ipc_ns.clone()),
+        "mnt" => NsFd::Mnt(nsproxy.mnt_ns.clone()),
+        "pid" => NsFd::Pid(nsproxy.pid_ns.clone()),
+        "net" => NsFd::Net(nsproxy.net_ns.clone()),
+        "user" => NsFd::User(nsproxy.user_ns.clone()),
+        _ => return Some(Err(AxError::NotFound)),
+    };
+
+    drop(nsproxy);
+
+    let fd = nsfd.add_to_fd_table(flags & O_CLOEXEC != 0);
+    Some(fd)
 }
 
 ktracepoint::define_event_trace!(
@@ -270,6 +319,12 @@ pub fn sys_openat(
 
     let mode = mode & !thread.proc_data.umask();
 
+    // Intercept /proc/<pid>/ns/<type> opens: create an NsFd instead of
+    // a regular file descriptor so that setns(2) receives a valid target.
+    if let Some(result) = try_open_nsfd(&path, uflags) {
+        return result.map(|fd| fd as isize);
+    }
+
     let cred = thread.cred();
     let options = flags_to_options(flags, mode, (cred.fsuid, cred.fsgid));
     let should_notify_create = uflags & O_CREAT != 0
@@ -280,6 +335,7 @@ pub fn sys_openat(
             Err(err) => Err(err),
         })?;
 
+    // Open first, then install the file so filesystem errors propagate unchanged.
     let fd =
         with_fs(dirfd, |fs| options.open(fs, path)).and_then(|it| add_to_fd(it, flags as _))?;
     if should_notify_create {
@@ -319,12 +375,12 @@ pub fn sys_close_range(first: i32, last: i32, flags: u32) -> AxResult<isize> {
     let flags = CloseRangeFlags::from_bits(flags).ok_or(AxError::InvalidInput)?;
     debug!("sys_close_range <= fds: [{first}, {last}], flags: {flags:?}");
     if flags.contains(CloseRangeFlags::UNSHARE) {
-        // TODO: optimize
         let curr = current();
-        let mut scope = curr.as_thread().proc_data.scope.write();
-        let mut guard = FD_TABLE.scope_mut(&mut scope);
-        let old_files = mem::take(guard.deref_mut());
-        old_files.write().clone_from(old_files.read().deref());
+        let proc_data = &curr.as_thread().proc_data;
+        let new_files = Arc::new(spin::RwLock::new(FD_TABLE.read().clone()));
+        proc_data.with_current_scope_mut(|scope| {
+            *FD_TABLE.scope_mut(scope).deref_mut() = new_files;
+        });
     }
 
     let cloexec = flags.contains(CloseRangeFlags::CLOEXEC);
@@ -501,6 +557,33 @@ pub fn sys_fcntl(fd: c_int, cmd: c_int, arg: usize) -> AxResult<isize> {
             memfd.add_seals(arg as u32)?;
             Ok(0)
         }
+        // F_GET_RW_HINT (1035), F_SET_RW_HINT (1036), F_GET_FILE_RW_HINT (1037),
+        // F_SET_FILE_RW_HINT (1038) — Linux 4.13+ I/O priority hints. They are
+        // advisory and we keep no per-file/inode hint state, but the ABI is not a
+        // bare no-op: the `arg` is a user `u64 *`. GET must write the current hint
+        // back (so callers read a defined value, and a bad/NULL pointer faults);
+        // SET must read the requested hint and reject unknown values with EINVAL.
+        // RocksDB/BookKeeper/Pulsar use these for WAL/SST files.
+        1035 | 1037 => {
+            // No stored hint → report the implicit default RWH_WRITE_LIFE_NOT_SET.
+            (arg as *mut u64).vm_write(0u64)?;
+            Ok(0)
+        }
+        1036 | 1038 => {
+            let hint = (arg as *const u64).vm_read()?;
+            // Valid hints are RWH_WRITE_LIFE_NOT_SET..=RWH_WRITE_LIFE_EXTREME (0..=5).
+            if hint > 5 {
+                return Err(AxError::InvalidInput);
+            }
+            Ok(0)
+        }
+        // Advisory fcntl commands with no per-fd state in StarryOS, reported as
+        // no-op success to match common Linux feature-detection usage:
+        // F_SETSIG (10) / F_GETSIG (11) / F_SETOWN_EX (15) / F_GETOWN_EX (16).
+        // (F_GETLK=5 / F_SETLK=6 are POSIX file locks already handled earlier by
+        // `dispatch_fcntl`, and F_GETOWN=8 / F_SETOWN=9 are handled above — none
+        // of those reach this arm.)
+        10 | 11 | 15 | 16 => Ok(0),
         _ => {
             warn!("unsupported fcntl parameters: cmd: {cmd}");
             Err(AxError::InvalidInput)

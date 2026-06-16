@@ -4,8 +4,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const LINKER_SCRIPT_NAME: &str = "linker.x";
-const LINKER_TEMPLATE_NAME: &str = "linker.lds.S";
+const LINKER_SCRIPT_NAME: &str = "axplat.x";
+const LINKER_TEMPLATE_NAME: &str = "axplat.lds.S";
 const SELECTED_PLATFORM_NAME: &str = "selected_platform.rs";
 
 struct PlatformFeature {
@@ -19,41 +19,6 @@ const PLATFORM_FEATURES: &[PlatformFeature] = &[
         feature: "plat-dyn",
         target_arch: None,
         crate_name: "axplat_dyn",
-    },
-    PlatformFeature {
-        feature: "x86-pc",
-        target_arch: Some("x86_64"),
-        crate_name: "ax_plat_x86_pc",
-    },
-    PlatformFeature {
-        feature: "x86-qemu-q35",
-        target_arch: Some("x86_64"),
-        crate_name: "ax_plat_x86_qemu_q35",
-    },
-    PlatformFeature {
-        feature: "aarch64-qemu-virt",
-        target_arch: Some("aarch64"),
-        crate_name: "ax_plat_aarch64_qemu_virt",
-    },
-    PlatformFeature {
-        feature: "aarch64-raspi",
-        target_arch: Some("aarch64"),
-        crate_name: "ax_plat_aarch64_raspi",
-    },
-    PlatformFeature {
-        feature: "aarch64-bsta1000b",
-        target_arch: Some("aarch64"),
-        crate_name: "ax_plat_aarch64_bsta1000b",
-    },
-    PlatformFeature {
-        feature: "aarch64-phytium-pi",
-        target_arch: Some("aarch64"),
-        crate_name: "ax_plat_aarch64_phytium_pi",
-    },
-    PlatformFeature {
-        feature: "riscv64-qemu-virt",
-        target_arch: Some("riscv64"),
-        crate_name: "ax_plat_riscv64_qemu_virt",
     },
     PlatformFeature {
         feature: "riscv64-sg2002",
@@ -72,18 +37,13 @@ const PLATFORM_FEATURES: &[PlatformFeature] = &[
     },
 ];
 
-const DEFAULT_PLATFORMS: &[(&str, &str)] = &[
-    ("aarch64", "ax_plat_aarch64_qemu_virt"),
-    ("loongarch64", "ax_plat_loongarch64_qemu_virt"),
-    ("riscv64", "ax_plat_riscv64_qemu_virt"),
-    ("x86_64", "ax_plat_x86_pc"),
-];
+const DEFAULT_PLATFORMS: &[(&str, &str)] = &[("loongarch64", "ax_plat_loongarch64_qemu_virt")];
 
 fn main() {
     println!("cargo:rustc-check-cfg=cfg(plat_dyn)");
-    println!("cargo:rustc-check-cfg=cfg(ax_hal_any_platform_feature)");
     println!("cargo:rerun-if-changed={LINKER_TEMPLATE_NAME}");
     println!("cargo:rerun-if-env-changed=AX_CONFIG_PATH");
+    println!("cargo:rerun-if-env-changed={}", feature_env("host-test"));
     println!("cargo:rerun-if-env-changed={}", feature_env("myplat"));
     println!("cargo:rerun-if-env-changed={}", feature_env("defplat"));
     for platform in PLATFORM_FEATURES {
@@ -94,27 +54,25 @@ fn main() {
     }
 
     let arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap();
-    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    let selected_platform = check_platform_features(&arch, &target_os);
-    gen_selected_platform(&arch, &target_os, selected_platform).unwrap();
+    let selected_platform = check_platform_features(&arch);
+    gen_selected_platform(&arch, selected_platform).unwrap();
 
     let config = load_linker_config().unwrap();
 
-    if config.platform != "dummy" {
+    let platform_linker_is_external = selected_platform
+        .is_some_and(|platform| matches!(platform.feature, "plat-dyn" | "loongarch64-qemu-virt"));
+
+    if config.platform != "dummy" && !platform_linker_is_external {
         gen_linker_script(&arch, &config).unwrap();
     }
 }
 
-fn check_platform_features(arch: &str, target_os: &str) -> Option<&'static PlatformFeature> {
+fn check_platform_features(arch: &str) -> Option<&'static PlatformFeature> {
     let has_myplat = feature_enabled("myplat");
     let enabled_platforms = PLATFORM_FEATURES
         .iter()
         .filter(|platform| feature_enabled(platform.feature))
         .collect::<Vec<_>>();
-
-    if has_myplat || !enabled_platforms.is_empty() {
-        println!("cargo:rustc-cfg=ax_hal_any_platform_feature");
-    }
 
     if has_myplat && !enabled_platforms.is_empty() {
         panic!("ax-hal/myplat must not be combined with a built-in ax-hal platform feature");
@@ -141,16 +99,14 @@ fn check_platform_features(arch: &str, target_os: &str) -> Option<&'static Platf
         }
     }
 
-    if target_os == "none" {
-        for platform in &enabled_platforms {
-            if let Some(target_arch) = platform.target_arch
-                && arch != target_arch
-            {
-                panic!(
-                    "ax-hal/{} requires target_arch = \"{}\"",
-                    platform.feature, target_arch
-                );
-            }
+    for platform in &enabled_platforms {
+        if let Some(target_arch) = platform.target_arch
+            && arch != target_arch
+        {
+            panic!(
+                "ax-hal/{} requires target_arch = \"{}\"",
+                platform.feature, target_arch
+            );
         }
     }
 
@@ -161,21 +117,17 @@ fn check_platform_features(arch: &str, target_os: &str) -> Option<&'static Platf
     })
 }
 
-fn gen_selected_platform(
-    arch: &str,
-    target_os: &str,
-    platform: Option<&PlatformFeature>,
-) -> Result<()> {
+fn gen_selected_platform(arch: &str, platform: Option<&PlatformFeature>) -> Result<()> {
     let crate_name = if let Some(platform) = platform {
         if platform.feature == "plat-dyn" {
-            (target_os == "none").then_some(platform.crate_name)
+            Some(platform.crate_name)
         } else {
             platform
                 .target_arch
                 .is_some_and(|target_arch| target_arch == arch)
                 .then_some(platform.crate_name)
         }
-    } else if target_os == "none" && feature_enabled("defplat") && !feature_enabled("myplat") {
+    } else if feature_enabled("defplat") && !feature_enabled("myplat") {
         DEFAULT_PLATFORMS
             .iter()
             .find_map(|(target_arch, crate_name)| (*target_arch == arch).then_some(*crate_name))
@@ -249,6 +201,10 @@ fn get_string(value: &toml::Value, keys: &[&str]) -> Result<String> {
 
 fn get_usize(value: &toml::Value, keys: &[&str]) -> Result<usize> {
     let value = get_value(value, keys)?;
+    parse_value_usize(value, keys)
+}
+
+fn parse_value_usize(value: &toml::Value, keys: &[&str]) -> Result<usize> {
     match value {
         toml::Value::Integer(value) => usize::try_from(*value)
             .map_err(|_| invalid_data(format!("{} is out of range", keys.join(".")))),
@@ -296,42 +252,23 @@ fn gen_linker_script(arch: &str, config: &LinkerConfig) -> Result<()> {
         .replace("%ARCH%", output_arch)
         .replace("%KERNEL_BASE%", &format!("{:#x}", config.kernel_base_vaddr))
         .replace(
+            "%KERNEL_BASE_VADDR%",
+            &format!("{:#x}", config.kernel_base_vaddr),
+        )
+        .replace(
             "%KERNEL_BASE_PADDR%",
             &format!("{:#x}", config.kernel_base_paddr),
         )
-        .replace("%CPU_NUM%", &format!("{}", config.max_cpu_num))
-        .replace(
-            "%DWARF%",
-            if std::env::var("DWARF").is_ok_and(|v| v == "y") {
-                r#"debug_abbrev : { . += SIZEOF(.debug_abbrev); }
-    debug_addr : { . += SIZEOF(.debug_addr); }
-    debug_aranges : { . += SIZEOF(.debug_aranges); }
-    debug_info : { . += SIZEOF(.debug_info); }
-    debug_line : { . += SIZEOF(.debug_line); }
-    debug_line_str : { . += SIZEOF(.debug_line_str); }
-    debug_ranges : { . += SIZEOF(.debug_ranges); }
-    debug_rnglists : { . += SIZEOF(.debug_rnglists); }
-    debug_str : { . += SIZEOF(.debug_str); }
-    debug_str_offsets : { . += SIZEOF(.debug_str_offsets); }"#
-            } else {
-                ""
-            },
-        );
+        .replace("%CPU_NUM%", &format!("{}", config.max_cpu_num));
 
     // target/<target_triple>/<mode>/build/ax-hal-xxxx/out
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let linker_path = out_dir.join(LINKER_SCRIPT_NAME);
 
-    // target/<target_triple>/<mode>/build/ax-hal-xxxx/out/linker.x
+    // target/<target_triple>/<mode>/build/ax-hal-xxxx/out/axplat.x
     fs::write(&linker_path, &ld_content)?;
 
     println!("cargo:rustc-link-search={}", out_dir.display());
-    println!("cargo:rustc-link-arg=-T{}", linker_path.display());
-
-    // Keep a stable copy under target/<target_triple>/<mode>/ for callers
-    // that still link outside Cargo build-script search paths.
-    let target_dir = out_dir.join("../../..");
-    fs::write(target_dir.join(LINKER_SCRIPT_NAME), &ld_content)?;
 
     Ok(())
 }

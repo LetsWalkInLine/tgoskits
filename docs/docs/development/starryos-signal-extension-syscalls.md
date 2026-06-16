@@ -44,10 +44,10 @@
 
 这些命令已登记到以下 grouped syscall 配置：
 
-- `test-suit/starryos/normal/qemu-smp1/syscall/qemu-x86_64.toml`
-- `test-suit/starryos/normal/qemu-smp1/syscall/qemu-riscv64.toml`
-- `test-suit/starryos/normal/qemu-smp1/syscall/qemu-aarch64.toml`
-- `test-suit/starryos/normal/qemu-smp1/syscall/qemu-loongarch64.toml`
+- `test-suit/starryos/qemu-smp1/system/qemu-x86_64.toml`
+- `test-suit/starryos/qemu-smp1/system/qemu-riscv64.toml`
+- `test-suit/starryos/qemu-smp1/system/qemu-aarch64.toml`
+- `test-suit/starryos/qemu-smp1/system/qemu-loongarch64.toml`
 
 ## 验证结果
 
@@ -61,13 +61,13 @@
 | Linux 参考 | `env -u LD_PRELOAD /tmp/test-sigtimedwait` | 10 passed, 0 failed |
 | Linux 参考 | `env -u LD_PRELOAD /tmp/test-sigreturn` | 9 passed, 0 failed |
 | CMake | `cmake -S <test>/c -B /tmp/<test>-cmake && cmake --build /tmp/<test>-cmake` | 6 个 signal 测试全部通过 |
-| StarryOS 发现 | `cargo xtask starry test qemu -l -g normal --arch x86_64` | 通过，能发现 `normal/syscall` |
-| StarryOS grouped syscall | `env -u LD_PRELOAD cargo xtask starry test qemu --arch x86_64 -g normal -c syscall` | 失败于既有 `test-raw-msg-peek/c/prebuild.sh`，未执行到 signal 测试 |
+| StarryOS 发现 | `cargo xtask starry test qemu -l --arch x86_64` | 通过，能发现 `qemu-smp1/system` |
+| StarryOS grouped syscall | `env -u LD_PRELOAD cargo xtask starry test qemu --arch x86_64 -c qemu-smp1/system` | 失败于既有 `test-raw-msg-peek/c/prebuild.sh`，未执行到 signal 测试 |
 
 StarryOS grouped case 的具体阻塞点：
 
 ```text
-test-suit/starryos/normal/qemu-smp1/syscall/test-raw-msg-peek/c/prebuild.sh: line 4: apk: Symbolic link loop
+test-suit/starryos/qemu-smp1/system/syscall-test-raw-msg-peek/c/prebuild.sh: line 4: apk: Symbolic link loop
 failed to run test-raw-msg-peek prebuild.sh
 ```
 
@@ -75,14 +75,16 @@ failed to run test-raw-msg-peek prebuild.sh
 
 ## 学习笔记
 
-| syscall | 笔记 |
+本轮未拆分独立学习笔记，以下 syscall 的语义和验证结果已在本文汇总。
+
+| syscall | 记录 |
 |---------|------|
-| `sigaltstack` | [sigaltstack](./starryos-signal-extension-syscalls/sigaltstack.md) |
-| `rt_sigsuspend` | [rt_sigsuspend](./starryos-signal-extension-syscalls/rt_sigsuspend.md) |
-| `rt_sigqueueinfo` | [rt_sigqueueinfo](./starryos-signal-extension-syscalls/rt_sigqueueinfo.md) |
-| `rt_tgsigqueueinfo` | [rt_tgsigqueueinfo](./starryos-signal-extension-syscalls/rt_tgsigqueueinfo.md) |
-| `rt_sigtimedwait` | [rt_sigtimedwait](./starryos-signal-extension-syscalls/rt_sigtimedwait.md) |
-| `rt_sigreturn` | [rt_sigreturn](./starryos-signal-extension-syscalls/rt_sigreturn.md) |
+| `sigaltstack` | 本文汇总 |
+| `rt_sigsuspend` | 本文汇总 |
+| `rt_sigqueueinfo` | 本文汇总 |
+| `rt_tgsigqueueinfo` | 本文汇总 |
+| `rt_sigtimedwait` | 本文汇总 |
+| `rt_sigreturn` | 本文汇总 |
 
 ## 后续建议
 

@@ -13,23 +13,9 @@
 // limitations under the License.
 
 use ax_errno::AxResult;
-use axaddrspace::{GuestPhysAddr, HostPhysAddr};
-use axvisor_api::vmm::{VCpuId, VMId};
+use axvm_types::{GuestPhysAddr, HostPhysAddr, InterruptTriggerMode, VCpuId, VMId};
 
 use crate::exit::AxVCpuExitReason;
-
-/// Interrupt trigger mode.
-///
-/// Represents the trigger mode of an interrupt in a platform-neutral way.
-/// Architectures that do not distinguish between edge and level triggering
-/// can ignore this parameter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InterruptTriggerMode {
-    /// Edge-triggered interrupt.
-    EdgeTriggered,
-    /// Level-triggered interrupt.
-    LevelTriggered,
-}
 
 /// Architecture-specific virtual CPU trait definition.
 ///

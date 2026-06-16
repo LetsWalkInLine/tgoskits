@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0](https://github.com/rcore-os/tgoskits/compare/somehal-v0.6.10...somehal-v0.7.0) - 2026-06-12
+
+### Fixed
+
+- *(ci)* stabilize x86 Starry QEMU timing ([#1245](https://github.com/rcore-os/tgoskits/pull/1245))
+- *(axruntime)* ensure aarch64 SMP IPI readiness before app init ([#1196](https://github.com/rcore-os/tgoskits/pull/1196))
+- *(somehal)* route LoongArch ACPI GSIs through PCH-PIC
+- *(loongarch64)* ack timer irq before dispatch ([#1222](https://github.com/rcore-os/tgoskits/pull/1222))
+
+### Other
+
+- *(irq)* carry ACPI IRQ routing metadata
+- *(rdrive)* carry probe context and PCI INTx routes
+
+## [0.6.10](https://github.com/rcore-os/tgoskits/compare/somehal-v0.6.9...somehal-v0.6.10) - 2026-06-11
+
+### Added
+
+- *(somehal)* support dynamic CPU and interrupt hooks
+
+## [0.6.9](https://github.com/rcore-os/tgoskits/compare/somehal-v0.6.8...somehal-v0.6.9) - 2026-06-09
+
+### Added
+
+- *(std)* unify std-aware ArceOS builds ([#1080](https://github.com/rcore-os/tgoskits/pull/1080))
+- *(somehal)* register x86 ACPI IOAPIC through rdrive ([#1155](https://github.com/rcore-os/tgoskits/pull/1155))
+
+### Fixed
+
+- *(ci)* switch x86_64 defaults to dynamic platform ([#1024](https://github.com/rcore-os/tgoskits/pull/1024))
+
+### Other
+
+- *(arceos)* consolidate Rust QEMU test suite ([#1174](https://github.com/rcore-os/tgoskits/pull/1174))
+
+## [0.6.8](https://github.com/rcore-os/tgoskits/compare/somehal-v0.6.7...somehal-v0.6.8) - 2026-06-03
+
+### Added
+
+- *(irq)* introduce shared IRQ framework ([#1065](https://github.com/rcore-os/tgoskits/pull/1065))
+- *(riscv64)* support dynamic platform on QEMU and SG2002 ([#961](https://github.com/rcore-os/tgoskits/pull/961))
+
+### Fixed
+
+- *(repo)* normalize allocator and RISC-V dependencies ([#1021](https://github.com/rcore-os/tgoskits/pull/1021))
+
+### Other
+
+- *(linker)* layer platform runtime and final scripts ([#1075](https://github.com/rcore-os/tgoskits/pull/1075))
+- *(deps)* update spin 0.10→0.12, ostool 0.19→0.21 ([#978](https://github.com/rcore-os/tgoskits/pull/978))
+- Implement platform-specific IRQ handling and architecture setup ([#979](https://github.com/rcore-os/tgoskits/pull/979))
+
 ## [0.6.6](https://github.com/drivercraft/sparreal-os/compare/somehal-v0.6.5...somehal-v0.6.6) - 2026-04-02
 
 ### Other

@@ -1,8 +1,8 @@
 use ax_errno::{AxResult, ax_err};
 use ax_kspin::SpinNoIrq as Mutex;
-use axaddrspace::device::{AccessWidth, Port, PortRange};
-use axdevice_base::{BaseDeviceOps, EmuDeviceType};
-use axvisor_api::time;
+use axdevice_base::{AccessWidth, BaseDeviceOps, EmuDeviceType, Port, PortRange};
+
+use crate::host;
 
 const PIT_CHANNEL0: u16 = 0x40;
 const PIT_CHANNEL2: u16 = 0x42;
@@ -13,6 +13,7 @@ const PIT_PORT_END: u16 = PIT_SPEAKER_CONTROL;
 const PIT_BASE_FREQUENCY_HZ: u64 = 1_193_182;
 const NANOSECONDS_PER_SECOND: u64 = 1_000_000_000;
 const MIN_PERIOD_NS: u64 = 1_000;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AccessMode {
     LatchCount,
@@ -374,7 +375,7 @@ impl BaseDeviceOps<PortRange> for EmulatedPit {
             return ax_err!(Unsupported, "x86 PIT only supports byte port reads");
         }
 
-        let now_ns = time::current_time_nanos() as u64;
+        let now_ns = host::current_time_nanos();
         let mut state = self.state.lock();
         let value = match port.0 {
             PIT_CHANNEL0 => state.channel0.read_count(now_ns),
@@ -394,12 +395,14 @@ impl BaseDeviceOps<PortRange> for EmulatedPit {
             return ax_err!(Unsupported, "x86 PIT only supports byte port writes");
         }
 
-        let now_ns = time::current_time_nanos() as u64;
+        let now_ns = host::current_time_nanos();
         let mut state = self.state.lock();
         match port.0 {
             PIT_CHANNEL0 => state.channel0.write_count(val as u8, now_ns),
             PIT_CHANNEL2 => state.channel2.write_count(val as u8, now_ns),
-            PIT_COMMAND => Self::write_command(&mut state, val as u8, now_ns),
+            PIT_COMMAND => {
+                Self::write_command(&mut state, val as u8, now_ns);
+            }
             PIT_SPEAKER_CONTROL => state.speaker_control = val as u8,
             _ => return ax_err!(Unsupported, "unsupported x86 PIT write port"),
         }

@@ -2,11 +2,13 @@ pub mod epoll;
 pub mod event;
 mod fs;
 pub mod inotify;
-#[cfg(all(feature = "sg2002", not(feature = "plat-dyn")))]
+pub mod io_uring;
+#[cfg(feature = "sg2002")]
 pub mod ion;
 pub mod memfd;
 mod net;
 pub mod netlink;
+mod nsfd;
 mod packet;
 mod pidfd;
 mod pipe;
@@ -32,7 +34,9 @@ use spin::RwLock;
 
 pub use self::{
     fs::{Directory, File, resolve_at, with_fs},
+    io_uring::IoUring,
     net::Socket,
+    nsfd::NsFd,
     packet::{PacketSocket, SockAddrLl},
     pidfd::PidFd,
     pipe::Pipe,
@@ -174,7 +178,7 @@ pub trait FileLike: Pollable + DowncastSync {
         Err(AxError::NoSuchDevice)
     }
 
-    fn device_mmap(&self, _offset: u64) -> AxResult<DeviceMmap> {
+    fn device_mmap(&self, _offset: u64, _length: u64) -> AxResult<DeviceMmap> {
         Err(AxError::BadFileDescriptor)
     }
 
@@ -302,14 +306,7 @@ pub fn close_file_like(fd: c_int) -> AxResult {
         release_locks_on_close(f);
         return Ok(());
     }
-    #[cfg(feature = "ebpf")]
-    {
-        if crate::perf_event::perf_event_close(fd as u32).is_ok() {
-            return Ok(());
-        }
-        crate::ebpf::bpf_close_fd(fd as u32)?;
-    }
-    Ok(())
+    Err(AxError::BadFileDescriptor)
 }
 
 fn notify_close_write(fd: &FileDescriptor) {
@@ -401,11 +398,6 @@ pub fn close_all_fds() {
     for key in lock_keys {
         crate::syscall::wake_lock_waiters(key);
         crate::syscall::wake_flock_waiters(key);
-    }
-    #[cfg(feature = "ebpf")]
-    {
-        crate::perf_event::perf_event_close_all();
-        crate::ebpf::bpf_close_all_fds();
     }
 }
 

@@ -8,10 +8,9 @@ mod dir;
 mod dyn_debug;
 mod file;
 mod fs;
-mod proc;
+pub(crate) mod proc;
 mod sysfs;
 mod tmp;
-#[cfg(feature = "plat-dyn")]
 pub(crate) mod usbfs;
 
 use alloc::{boxed::Box, sync::Arc};
@@ -70,7 +69,7 @@ pub fn tmp_tmpfs() -> Option<Arc<tmp::MemoryFs>> {
 
 fn mount_at(fs: &FsContext, path: &str, mount_fs: Filesystem) -> LinuxResult<()> {
     if fs.resolve(path).is_err() {
-        fs.create_dir(path, DIR_PERMISSION)?;
+        fs.create_dir(path, DIR_PERMISSION, 0, 0)?;
     }
     fs.resolve(path)?.mount(&mount_fs)?;
     info!("Mounted {} at {}", mount_fs.name(), path);
@@ -83,8 +82,10 @@ pub fn mount_all() -> LinuxResult<()> {
 
     let fs = FS_CONTEXT.lock();
     mount_at(&fs, "/dev", dev::new_devfs())?;
-    #[cfg(feature = "plat-dyn")]
-    mount_at(&fs, "/dev/bus/usb", usbfs::new_usbfs()?)?;
+    let usbfs = usbfs::new_usbfs()?;
+    if let Some(dev_usbfs) = usbfs {
+        mount_at(&fs, "/dev/bus/usb", dev_usbfs)?;
+    }
 
     let (shm_fs, shm_handle) = tmp::MemoryFs::new_with_handle();
     mount_at(&fs, "/dev/shm", shm_fs)?;
@@ -97,8 +98,9 @@ pub fn mount_all() -> LinuxResult<()> {
     mount_at(&fs, "/proc", proc::new_procfs())?;
 
     mount_at(&fs, "/sys", sysfs::new_sysfs())?;
-    #[cfg(feature = "plat-dyn")]
-    mount_at(&fs, "/sys/bus/usb", usbfs::new_bus_usb_sysfs())?;
+    if usbfs::has_manager() {
+        mount_at(&fs, "/sys/bus/usb", usbfs::new_bus_usb_sysfs())?;
+    }
 
     mount_at(&fs, "/sys/kernel/debug", debug::new_debugfs())?;
 

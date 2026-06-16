@@ -10,9 +10,12 @@ pub use crate::build::LogLevel;
 use crate::context::{ResolvedStarryRequest, STARRY_PACKAGE, starry_arch_for_target_checked};
 
 pub(crate) fn default_starry_build_info_for_target(target: &str) -> StarryBuildInfo {
-    let mut build_info = StarryBuildInfo::default_for_target(target);
-    build_info.plat_dyn = false;
-    build_info.features = vec!["qemu".to_string()];
+    let mut build_info = StarryBuildInfo::default();
+    if build_info.effective_plat_dyn(target, None) {
+        build_info.features = Vec::new();
+    } else {
+        build_info.features = vec!["qemu".to_string()];
+    }
     build_info
 }
 
@@ -36,6 +39,8 @@ pub(crate) fn resolve_build_info_path(
 pub(crate) fn load_target_from_build_config(path: &Path) -> anyhow::Result<Option<String>> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| anyhow!("failed to read Starry build config {}: {e}", path.display()))?;
+    crate::build::reject_removed_std_field(path, &content)?;
+    crate::build::reject_arceos_app_c_field(path, &content)?;
 
     if let Ok(board_file) = toml::from_str::<board::StarryBoardFile>(&content) {
         return Ok(Some(board_file.target));
@@ -56,7 +61,15 @@ pub(crate) fn load_build_info(request: &ResolvedStarryRequest) -> anyhow::Result
         crate::build::ensure_build_info(&request.build_info_path, || {
             default_starry_build_info_for_target(&request.target)
         })?;
-        crate::build::load_build_info(&request.build_info_path)?
+        let content = std::fs::read_to_string(&request.build_info_path)?;
+        crate::build::reject_arceos_app_c_field(&request.build_info_path, &content)?;
+        let build_info: StarryBuildInfo = toml::from_str(&content).with_context(|| {
+            format!(
+                "failed to parse build info {}",
+                request.build_info_path.display()
+            )
+        })?;
+        build_info
     };
 
     crate::build::apply_makefile_features(&mut build_info, &request.package, &makefile_features);
@@ -78,7 +91,15 @@ pub(crate) fn load_cargo_config(request: &ResolvedStarryRequest) -> anyhow::Resu
         crate::build::ensure_build_info(&request.build_info_path, || {
             default_starry_build_info_for_target(&request.target)
         })?;
-        crate::build::load_build_info(&request.build_info_path)?
+        let content = std::fs::read_to_string(&request.build_info_path)?;
+        crate::build::reject_arceos_app_c_field(&request.build_info_path, &content)?;
+        let build_info: StarryBuildInfo = toml::from_str(&content).with_context(|| {
+            format!(
+                "failed to parse build info {}",
+                request.build_info_path.display()
+            )
+        })?;
+        build_info
     };
     crate::build::apply_makefile_features_with_metadata(
         &mut build_info,
@@ -148,19 +169,36 @@ fn patch_starry_cargo_config(
     cargo
         .env
         .insert("AX_TARGET".to_string(), request.target.clone());
-    if uses_default_qemu_platform {
+    if uses_default_qemu_platform && let Some(platform) = platform {
         cargo
             .env
             .entry("AX_PLATFORM".to_string())
             .or_insert_with(|| platform.to_string());
     }
 
+    inject_kallsyms_pre_build_cmd(cargo, &request.target)?;
     inject_kallsyms_post_build_cmd(cargo)?;
 
     if cargo.env.get("UIMAGE").map(|v| v.as_str()) == Some("y") {
         inject_uimage_post_build_cmd(cargo, &request.arch)?;
     }
 
+    Ok(())
+}
+
+fn inject_kallsyms_pre_build_cmd(cargo: &mut Cargo, target: &str) -> anyhow::Result<()> {
+    let target_dir = crate::context::workspace_root_path()?
+        .join("target")
+        .join(target)
+        .join("release");
+    let kernel = target_dir.join(STARRY_PACKAGE);
+    let bin = target_dir.join(format!("{}.bin", STARRY_PACKAGE));
+    let cmd = format!(
+        "rm -f {} {}",
+        shell_quote(&kernel.display().to_string()),
+        shell_quote(&bin.display().to_string())
+    );
+    cargo.pre_build_cmds.push(cmd);
     Ok(())
 }
 
@@ -261,9 +299,7 @@ fn uses_default_qemu_platform(features: &[String]) -> bool {
 
 fn default_starry_qemu_platform_feature(feature: &str) -> Option<&str> {
     match feature.strip_prefix("ax-hal/")? {
-        "x86-pc" | "aarch64-qemu-virt" | "riscv64-qemu-virt" | "loongarch64-qemu-virt" => {
-            Some(feature)
-        }
+        "loongarch64-qemu-virt" => Some(feature),
         _ => None,
     }
 }
@@ -425,6 +461,30 @@ mod tests {
     }
 
     #[test]
+    fn default_aarch64_starry_build_info_uses_dynamic_platform() {
+        let build_info = default_starry_build_info_for_target("aarch64-unknown-none-softfloat");
+
+        assert!(build_info.plat_dyn);
+        assert!(!build_info.features.contains(&"qemu".to_string()));
+    }
+
+    #[test]
+    fn default_riscv64_starry_build_info_uses_dynamic_platform() {
+        let build_info = default_starry_build_info_for_target("riscv64gc-unknown-none-elf");
+
+        assert!(build_info.plat_dyn);
+        assert!(!build_info.features.contains(&"qemu".to_string()));
+    }
+
+    #[test]
+    fn default_x86_starry_build_info_uses_dynamic_platform() {
+        let build_info = default_starry_build_info_for_target("x86_64-unknown-none");
+
+        assert!(build_info.plat_dyn);
+        assert!(build_info.features.is_empty());
+    }
+
+    #[test]
     fn load_build_info_reads_existing_file() {
         let root = tempdir().unwrap();
         let path = root.path().join(".build-target.toml");
@@ -448,6 +508,52 @@ HELLO = "world"
         assert_eq!(
             build_info.env.get("HELLO").map(String::as_str),
             Some("world")
+        );
+    }
+
+    #[test]
+    fn load_target_from_build_config_rejects_removed_std_field() {
+        let root = tempdir().unwrap();
+        let path = root.path().join(".build-target.toml");
+        fs::write(
+            &path,
+            r#"
+std = false
+features = []
+log = "Info"
+
+"#,
+        )
+        .unwrap();
+
+        let err = load_target_from_build_config(&path).unwrap_err();
+
+        assert!(
+            err.to_string().contains("uses removed `std` field"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn load_target_from_build_config_rejects_arceos_app_c_field() {
+        let root = tempdir().unwrap();
+        let path = root.path().join(".build-target.toml");
+        fs::write(
+            &path,
+            r#"
+app-c = "c"
+features = []
+log = "Info"
+
+"#,
+        )
+        .unwrap();
+
+        let err = load_target_from_build_config(&path).unwrap_err();
+
+        assert!(
+            err.to_string().contains("uses ArceOS-only `app-c` field"),
+            "{err:#}"
         );
     }
 
@@ -483,7 +589,6 @@ HELLO = "world"
             max_cpu_num: None,
             axconfig_overrides: Vec::new(),
             plat_dyn: false,
-            std_build: false,
         };
         let mut cargo = build_info.into_base_cargo_config_with_log(
             STARRY_PACKAGE.to_string(),
@@ -562,15 +667,11 @@ HELLO = "world"
             max_cpu_num: Some(8),
             axconfig_overrides: Vec::new(),
             plat_dyn: true,
-            std_build: false,
         };
         let mut cargo = build_info.into_base_cargo_config_with_log(
             STARRY_PACKAGE.to_string(),
-            "scripts/targets/pie/aarch64-unknown-none-softfloat.json".to_string(),
-            StarryBuildInfo::build_cargo_args(
-                "scripts/targets/pie/aarch64-unknown-none-softfloat.json",
-                &[],
-            ),
+            "scripts/targets/std/pie/aarch64-unknown-linux-musl.json".to_string(),
+            Vec::new(),
         );
 
         let metadata = crate::build::workspace_metadata().unwrap();
@@ -590,7 +691,7 @@ HELLO = "world"
         assert!(!cargo.env.contains_key("AX_PLATFORM"));
         assert_eq!(
             cargo.target,
-            "scripts/targets/pie/aarch64-unknown-none-softfloat.json"
+            "scripts/targets/std/pie/aarch64-unknown-linux-musl.json"
         );
     }
 
@@ -608,15 +709,11 @@ HELLO = "world"
             max_cpu_num: None,
             axconfig_overrides: Vec::new(),
             plat_dyn: true,
-            std_build: false,
         };
         let mut cargo = build_info.into_base_cargo_config_with_log(
             STARRY_PACKAGE.to_string(),
-            "scripts/targets/pie/aarch64-unknown-none-softfloat.json".to_string(),
-            StarryBuildInfo::build_cargo_args(
-                "scripts/targets/pie/aarch64-unknown-none-softfloat.json",
-                &[],
-            ),
+            "scripts/targets/std/pie/aarch64-unknown-linux-musl.json".to_string(),
+            Vec::new(),
         );
 
         let metadata = crate::build::workspace_metadata().unwrap();
@@ -627,10 +724,34 @@ HELLO = "world"
     }
 
     #[test]
+    fn aarch64_qemu_virt_is_not_a_default_static_starry_platform() {
+        assert_eq!(
+            default_starry_qemu_platform_feature("ax-hal/aarch64-qemu-virt"),
+            None
+        );
+    }
+
+    #[test]
+    fn aarch64_has_no_static_starry_default_platform() {
+        assert_eq!(
+            crate::context::starry_default_platform_for_arch_checked("aarch64").unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn riscv64_has_no_starry_default_platform() {
+        assert_eq!(
+            crate::context::starry_default_platform_for_arch_checked("riscv64").unwrap(),
+            None
+        );
+    }
+
+    #[test]
     fn uimage_load_paddr_uses_dynamic_riscv64_fallback_without_axconfig() {
         let cargo = Cargo {
             env: HashMap::new(),
-            target: "scripts/targets/pie/riscv64gc-unknown-none-elf.json".to_string(),
+            target: "scripts/targets/std/pie/riscv64gc-unknown-linux-musl.json".to_string(),
             package: STARRY_PACKAGE.to_string(),
             bin: None,
             features: vec!["plat-dyn".to_string()],
@@ -706,12 +827,37 @@ HELLO = "world"
         assert!(
             !cargo
                 .features
-                .contains(&"ax-hal/riscv64-qemu-virt".to_string())
+                .iter()
+                .any(|feature| feature.starts_with("qemu"))
         );
         assert!(!cargo.features.contains(&"qemu".to_string()));
         assert_eq!(
             cargo.env.get("AX_PLATFORM").map(String::as_str),
             Some("riscv64-sg2002")
+        );
+    }
+
+    #[test]
+    fn load_cargo_config_keeps_pie_target_for_non_kmod_plat_dyn_request() {
+        let mut request = request(
+            PathBuf::from("/tmp/.build.toml"),
+            "aarch64",
+            "aarch64-unknown-none-softfloat",
+        );
+        request.build_info_override = Some(StarryBuildInfo {
+            plat_dyn: true,
+            features: vec!["ax-driver/virtio-blk".to_string()],
+            ..default_starry_build_info_for_target("aarch64-unknown-none-softfloat")
+        });
+
+        let cargo = load_cargo_config(&request).unwrap();
+
+        assert!(
+            cargo
+                .target
+                .ends_with("scripts/targets/std/pie/aarch64-unknown-linux-musl.json"),
+            "expected pie target, got {}",
+            cargo.target
         );
     }
 
@@ -756,11 +902,8 @@ HELLO = "world"
         let build_info = default_starry_build_info_for_target(&request.target);
         let mut cargo = build_info.into_base_cargo_config_with_log(
             request.package.clone(),
-            "scripts/targets/no-pie/aarch64-unknown-none-softfloat.json".to_string(),
-            StarryBuildInfo::build_cargo_args(
-                "scripts/targets/no-pie/aarch64-unknown-none-softfloat.json",
-                &[],
-            ),
+            "scripts/targets/std/aarch64-unknown-linux-musl.json".to_string(),
+            vec!["-Z".to_string(), "json-target-spec".to_string()],
         );
 
         let metadata = crate::build::workspace_metadata().unwrap();
@@ -768,7 +911,7 @@ HELLO = "world"
 
         assert_eq!(
             cargo.target,
-            "scripts/targets/no-pie/aarch64-unknown-none-softfloat.json"
+            "scripts/targets/std/aarch64-unknown-linux-musl.json"
         );
         assert_eq!(cargo.env.get("AX_TARGET"), Some(&request.target));
     }
@@ -818,5 +961,17 @@ HELLO = "world"
         assert_eq!(cargo.post_build_cmds.len(), 2);
         assert!(cargo.post_build_cmds[0].contains("scripts/axbuild/scripts/starry-kallsyms.sh"));
         assert!(cargo.post_build_cmds[1].contains("mkimage"));
+    }
+    #[test]
+    fn starry_kallsyms_script_does_not_require_gawk_extensions() {
+        let script = crate::context::workspace_root_path()
+            .unwrap()
+            .join("scripts/axbuild/scripts/starry-kallsyms.sh");
+        let content = fs::read_to_string(script).unwrap();
+
+        assert!(
+            !content.contains("strtonum("),
+            "starry-kallsyms.sh must run with non-gawk awk implementations used by CI"
+        );
     }
 }

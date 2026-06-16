@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.3](https://github.com/rcore-os/tgoskits/compare/ax-plat-riscv64-sg2002-v0.4.2...ax-plat-riscv64-sg2002-v0.4.3) - 2026-06-12
+
+### Fixed
+
+- *(ci)* stabilize x86 Starry QEMU timing ([#1245](https://github.com/rcore-os/tgoskits/pull/1245))
+
+## [0.4.2](https://github.com/rcore-os/tgoskits/compare/ax-plat-riscv64-sg2002-v0.4.1...ax-plat-riscv64-sg2002-v0.4.2) - 2026-06-11
+
+### Fixed
+
+- fix typos in code and comments across the codebase ([#1206](https://github.com/rcore-os/tgoskits/pull/1206))
+
+## [0.4.1](https://github.com/rcore-os/tgoskits/compare/ax-plat-riscv64-sg2002-v0.4.0...ax-plat-riscv64-sg2002-v0.4.1) - 2026-06-09
+
+### Other
+
+- updated the following local packages: ax-cpu, ax-kspin, ax-driver, ax-plat, axklib, some-serial, rdif-block
+
+## [0.4.0](https://github.com/rcore-os/tgoskits/compare/ax-plat-riscv64-sg2002-v0.3.6...ax-plat-riscv64-sg2002-v0.4.0) - 2026-06-03
+
+### Added
+
+- *(irq)* introduce shared IRQ framework ([#1065](https://github.com/rcore-os/tgoskits/pull/1065))
+- *(riscv64)* support dynamic platform on QEMU and SG2002 ([#961](https://github.com/rcore-os/tgoskits/pull/961))
+
+### Fixed
+
+- *(repo)* normalize allocator and RISC-V dependencies ([#1021](https://github.com/rcore-os/tgoskits/pull/1021))
+
+### Other
+
+- *(rdif-block)* switch block drivers to submit poll ([#976](https://github.com/rcore-os/tgoskits/pull/976))
+- *(ax-alloc)* remove ax-allocator dependency, simplify to TLSF/buddy-slab backends ([#987](https://github.com/rcore-os/tgoskits/pull/987))
+- Implement platform-specific IRQ handling and architecture setup ([#979](https://github.com/rcore-os/tgoskits/pull/979))
+
 ## [0.3.6](https://github.com/rcore-os/tgoskits/compare/ax-plat-riscv64-sg2002-v0.3.5...ax-plat-riscv64-sg2002-v0.3.6) - 2026-05-22
 
 ### Added

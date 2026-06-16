@@ -22,6 +22,8 @@ extern crate log;
 extern crate log;
 
 extern crate alloc;
+#[cfg(test)]
+extern crate std;
 
 #[cfg(all(feature = "vmx", feature = "svm"))]
 compile_error!("features `vmx` and `svm` are mutually exclusive");
@@ -36,6 +38,7 @@ pub struct X86VCpuSetupConfig {
     pub emulate_com1: bool,
 }
 
+pub mod host;
 pub(crate) mod msr;
 #[cfg(feature = "vmx")]
 #[macro_use]
@@ -62,9 +65,7 @@ pub(crate) struct X86RealModeEntryState {
 }
 
 #[cfg(any(feature = "vmx", feature = "svm", test))]
-pub(crate) fn x86_real_mode_entry_state(
-    entry: axaddrspace::GuestPhysAddr,
-) -> X86RealModeEntryState {
+pub(crate) fn x86_real_mode_entry_state(entry: axvcpu::GuestPhysAddr) -> X86RealModeEntryState {
     if entry.as_usize() == X86_RESET_VECTOR_GPA {
         return X86RealModeEntryState {
             cs_selector: X86_RESET_CS_SELECTOR,
@@ -99,6 +100,12 @@ cfg_if::cfg_if! {
             SvmArchPerCpuState, SvmArchPerCpuState as X86ArchPerCpuState, SvmArchVCpu,
             SvmArchVCpu as X86ArchVCpu,
         };
+    } else {
+        // Fallback stub types for builds without any hypervisor backend
+        // (e.g. host-fs-only). Stubs implement the required traits so that
+        // downstream crates can still compile; they are never instantiated.
+        mod no_backend;
+        pub use no_backend::{X86ArchPerCpuState, X86ArchVCpu};
     }
 }
 
@@ -123,14 +130,14 @@ pub(crate) fn restore_host_interrupt_flag(host_rflags: u64) {
 
 #[cfg(any(feature = "vmx", feature = "svm"))]
 pub(crate) fn host_tsc_frequency_mhz() -> Option<u32> {
-    u32::try_from(axvisor_api::time::nanos_to_ticks(1_000))
+    u32::try_from(host::nanos_to_ticks(1_000))
         .ok()
         .filter(|&freq| freq > 0)
 }
 
 #[cfg(test)]
 mod tests {
-    use axaddrspace::GuestPhysAddr;
+    use axvcpu::GuestPhysAddr;
 
     use super::*;
 

@@ -64,7 +64,7 @@ flowchart TD
 
 除默认值差异外，各架构还有一些需要注意的特殊行为：
 
-- **plat_dyn**：`aarch64` 和 `riscv64` 支持 `plat_dyn = true`（动态平台加载），其他架构使用静态平台绑定
+- **plat_dyn**：省略时默认请求动态平台；`aarch64`、`x86_64`、`riscv64`、`loongarch64` 支持动态平台，只有显式写 `plat_dyn = false` 才请求静态平台绑定
 - **to_bin**：`x86_64` 不使用 `--bin`（直接生成 ELF 即可），其余架构默认将 ELF 转为 raw binary
 - **LoongArch QEMU**：运行 Axvisor loongarch64 时自动搜索 LVZ 版 QEMU（详见 [运行](./run#loongarch-特殊处理)）
 
@@ -74,12 +74,12 @@ flowchart TD
 
 | 架构 | 默认 rootfs 镜像 | StarryOS 默认平台 | GNU 工具前缀 | qemu-user 二进制 |
 |------|-----------------|------------------|-------------|-----------------|
-| `aarch64` | `rootfs-aarch64-alpine.img` | `aarch64-qemu-virt` | `aarch64-linux-musl` | `qemu-aarch64-static` |
-| `x86_64` | `rootfs-x86_64-alpine.img` | `x86-pc` | `x86_64-linux-musl` | `qemu-x86_64-static` |
-| `riscv64` | `rootfs-riscv64-alpine.img` | `riscv64-qemu-virt` | `riscv64-linux-musl` | `qemu-riscv64-static` |
-| `loongarch64` | `rootfs-loongarch64-alpine.img` | `loongarch64-qemu-virt` | `loongarch64-linux-musl` | `qemu-loongarch64-static` |
+| `aarch64` | `rootfs-aarch64-alpine.img` | 动态平台 | `aarch64-linux-musl` | `qemu-aarch64-static` |
+| `x86_64` | `rootfs-x86_64-alpine.img` | 动态平台 | `x86_64-linux-musl` | `qemu-x86_64-static` |
+| `riscv64` | `rootfs-riscv64-alpine.img` | 动态平台 | `riscv64-linux-musl` | `qemu-riscv64-static` |
+| `loongarch64` | `rootfs-loongarch64-alpine.img` | 动态平台 | `loongarch64-linux-musl` | `qemu-loongarch64-static` |
 
-这些字段由 `CrossCompileSpec` 承载，被 StarryOS 和 Axvisor 的 C/Python 测试用例的 prebuild 环境和 CMake 交叉编译流程所使用。`starry_default_platform_for_arch_checked()` 直接查表返回 StarryOS 的默认平台名。
+这些字段由 `CrossCompileSpec` 承载，被 StarryOS 和 Axvisor 的 C/Python 测试用例的 prebuild 环境和 CMake 交叉编译流程所使用。动态平台支持的 QEMU 构建默认不再绑定静态 StarryOS 平台；需要静态平台时，在构建配置中显式写 `plat_dyn = false`。
 
 ## Snapshot
 
@@ -104,7 +104,6 @@ Snapshot 机制解决了一个常见的工作流痛点：用户首次执行 `car
 package = "arceos-httpserver"
 arch = "aarch64"
 target = "aarch64-unknown-none-softfloat"
-plat_dyn = true
 
 [qemu]
 qemu_config = "test-suit/arceos/..."
@@ -199,7 +198,7 @@ pub struct BuildInfo {
 ```
 
 子系统定制：
-- **StarryOS**：强制 `plat_dyn = false`（StarryOS 不支持动态平台），默认 feature `["qemu"]`
+- **StarryOS**：`aarch64`/`riscv64` 默认走动态平台，其他架构保留静态 QEMU feature
 - **Axvisor**：默认清空 features，从 board config 加载 VM 配置
 
 ### 默认值
@@ -213,12 +212,12 @@ pub struct BuildInfo {
 | `log` | `Warn` | 默认日志级别 |
 | `max_cpu_num` | `None` | 不限制（单核） |
 | `axconfig_overrides` | `[]` | 无覆盖 |
-| `plat_dyn` | `false`（aarch64 除外） | aarch64 新建时默认为 `true` |
+| `plat_dyn` | `true`（aarch64/riscv64）/ `false`（其他） | QEMU 动态平台架构新建时默认为 `true` |
 
 ### 验证规则
 
 - `max_cpu_num`：值为 0 时报错（必须大于 0）
-- `plat_dyn`：仅 `aarch64-*` target 真正支持，其他架构即使配置为 `true` 也会被 `supports_platform_dynamic()` 强制回退为 `false`
+- `plat_dyn`：仅 `aarch64-*` 和 `riscv64*` target 真正支持，其他架构即使配置为 `true` 也会被 `supports_platform_dynamic()` 强制回退为 `false`
 
 ### Axvisor x86 虚拟化后端检测
 
@@ -284,8 +283,8 @@ axconfig 仅在**静态平台模式**（`plat_dyn = false`）下生成。动态�
 
 | 子系统 | 默认 plat_dyn | 是否生成 axconfig |
 |--------|-------------|-----------------|
-| ArceOS | `true`（aarch64）/ `false`（其他） | 仅 `plat_dyn = false` 时 |
-| StarryOS | `false` | 始终生成 |
+| ArceOS | `true`（aarch64/riscv64）/ `false`（其他） | 仅 `plat_dyn = false` 时 |
+| StarryOS | `true`（aarch64/riscv64）/ `false`（其他） | 仅 `plat_dyn = false` 时 |
 | Axvisor | `true`（aarch64/riscv64）/ `false`（其他） | 仅 `plat_dyn = false` 时 |
 
 ### 生成流程
@@ -301,7 +300,7 @@ flowchart TD
 
 生成步骤：
 
-1. **定位平台包**：从目标包的 `Cargo.toml` 依赖中查找名称匹配 `ax-plat-*` 的平台包（如 `ax-plat-aarch64-qemu-virt`）
+1. **定位平台包**：从目标包的 `Cargo.toml` 依赖中查找名称匹配 `ax-plat-*` 的平台包（如 `ax-plat-riscv64-sg2002`）
 2. **查找配置规格**：在平台包的 `Cargo.toml` 同目录下查找 `axconfig.toml` 配置规格文件
 3. **合并生成**：调用 `ax_config_gen` 配置引擎，将全局 `defconfig.toml`（`os/arceos/configs/defconfig.toml`）与平台 `axconfig.toml` 合并，同时注入自动生成的字段和用户覆盖值
 4. **写入产物**：输出到 `tmp/axbuild/axconfig/<package>/<target>/.axconfig.toml`
@@ -322,16 +321,16 @@ flowchart TD
 | 字段 | 值 |
 |------|-----|
 | `arch` | 从 target triple 提取的架构名 |
-| `platforms` | 平台包名（如 `riscv64-qemu-virt`） |
+| `platforms` | 平台包名（如 `riscv64-sg2002`） |
 | `plat.max-cpu-num` | `--smp` 参数值（仅 `max_cpu_num > 1` 时注入） |
 
 ### 配置内容示例
 
-以下是一个 riscv64 QEMU 平台的 `.axconfig.toml` 生成产物示例：
+以下是一个 RISC-V 静态板级平台的 `.axconfig.toml` 生成产物示例：
 
 ```toml
 arch = "riscv64"
-platform = "riscv64-qemu-virt"
+platform = "riscv64-sg2002"
 task-stack-size = 0x40000
 ticks-per-sec = 100
 
@@ -369,7 +368,7 @@ axbuild 在编译期和运行时使用多个环境变量，分布在配置、运
 | `SMP` | `BuildInfo.max_cpu_num` | 启动 CPU 核数 |
 | `AX_IP` / `AX_GW` | `BuildInfo.env` | QEMU slirp 网络 IP / 网关 |
 | `AX_CONFIG_PATH` | axbuild 生成 | `.axconfig.toml` 路径（仅 `plat_dyn = false`） |
-| `AX_PLATFORM` | 平台检测 | 平台名（如 `aarch64-qemu-virt`） |
+| `AX_PLATFORM` | 平台检测 | 平台名（如 `riscv64-sg2002`；动态平台构建通常不设置） |
 | `AX_ARCH` | arch 解析 | CPU 架构名 |
 | `AX_TARGET` | target 解析 | target triple |
 | `AXVISOR_VM_CONFIGS` | `--vmconfigs` | VM 配置文件列表（仅 Axvisor） |

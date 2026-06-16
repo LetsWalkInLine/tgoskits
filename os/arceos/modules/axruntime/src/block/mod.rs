@@ -1,65 +1,129 @@
-#[cfg(all(feature = "fs-ng", any(not(feature = "plat-dyn"), target_os = "none")))]
+#[cfg(feature = "fs-ng")]
 use alloc::vec::Vec;
 
-#[cfg(all(feature = "fs-ng", any(not(feature = "plat-dyn"), target_os = "none")))]
-mod root;
-#[cfg(any(
-    all(feature = "fs-ng", any(not(feature = "plat-dyn"), target_os = "none")),
-    test
-))]
-pub(crate) mod volume;
-
-#[cfg(all(feature = "fs-ng", any(not(feature = "plat-dyn"), target_os = "none")))]
-struct FsNgBlockDevice(ax_driver::block::Block);
-
-#[cfg(all(feature = "fs-ng", any(not(feature = "plat-dyn"), target_os = "none")))]
-impl ax_fs_ng::FsBlockDevice for FsNgBlockDevice {
-    fn name(&self) -> &str {
-        self.0.name()
+#[cfg(any(all(feature = "fs", not(feature = "fs-ng")), feature = "fs-ng"))]
+mod irq_support {
+    #[cfg(feature = "irq")]
+    pub(crate) struct BlockIrqState {
+        handler: ax_driver::block::BlockIrqHandler,
     }
 
-    fn num_blocks(&self) -> u64 {
-        self.0.num_blocks()
+    #[cfg(feature = "irq")]
+    pub(crate) type BlockIrqRegistration = crate::irq::HandlerRegistration<BlockIrqState>;
+
+    #[cfg(not(feature = "irq"))]
+    pub(crate) type BlockIrqRegistration = ();
+
+    #[cfg(feature = "irq")]
+    unsafe fn handle_block_irq(
+        _ctx: ax_hal::irq::IrqContext,
+        data: core::ptr::NonNull<()>,
+    ) -> ax_hal::irq::IrqReturn {
+        let state = unsafe { data.cast::<BlockIrqState>().as_ref() };
+        let _event = state.handler.handle();
+        ax_hal::irq::IrqReturn::Handled
     }
 
-    fn block_size(&self) -> usize {
-        self.0.block_size()
+    pub(crate) fn register_irq_handler(
+        block: &mut ax_driver::block::Block,
+    ) -> Option<BlockIrqRegistration> {
+        #[cfg(feature = "irq")]
+        {
+            let name = alloc::string::String::from(block.name());
+            let (irq, handler) = block.take_irq_handler()?;
+            register_shared_for_block(
+                block,
+                name,
+                irq,
+                BlockIrqState { handler },
+                handle_block_irq,
+                ax_driver::block::Block::enable_irq,
+                ax_driver::block::Block::disable_irq,
+            )
+        }
+
+        #[cfg(not(feature = "irq"))]
+        {
+            let _ = block;
+            None
+        }
     }
 
-    fn read_block(&mut self, block_id: u64, buf: &mut [u8]) -> ax_errno::AxResult {
-        self.0.read_block(block_id, buf)
-    }
-
-    fn write_block(&mut self, block_id: u64, buf: &[u8]) -> ax_errno::AxResult {
-        self.0.write_block(block_id, buf)
-    }
-
-    fn flush(&mut self) -> ax_errno::AxResult {
-        self.0.flush()
+    #[cfg(feature = "irq")]
+    fn register_shared_for_block(
+        block: &mut ax_driver::block::Block,
+        name: alloc::string::String,
+        irq: usize,
+        state: BlockIrqState,
+        handler: ax_hal::irq::RawIrqHandler,
+        enable_irq: impl FnOnce(&mut ax_driver::block::Block),
+        disable_irq: impl FnOnce(&mut ax_driver::block::Block),
+    ) -> Option<BlockIrqRegistration> {
+        match crate::irq::HandlerRegistration::register_shared(name, irq, state, handler) {
+            Ok(registration) => {
+                enable_irq(block);
+                Some(registration)
+            }
+            Err(_) => {
+                disable_irq(block);
+                None
+            }
+        }
     }
 }
 
-#[cfg(any(
-    all(
-        feature = "fs",
-        not(feature = "fs-ng"),
-        any(not(feature = "plat-dyn"), target_os = "none")
-    ),
-    all(feature = "fs-ng", any(not(feature = "plat-dyn"), target_os = "none"))
-))]
-pub(crate) fn register_irq_handlers(blocks: &mut [ax_driver::block::Block]) {
-    // Block queues are driven through the rdif-block polled path for now. Avoid
-    // installing block handlers on shared legacy IRQ lines used by net devices.
-    let _ = blocks;
+#[cfg(any(all(feature = "fs", not(feature = "fs-ng")), feature = "fs-ng"))]
+pub(crate) use irq_support::{BlockIrqRegistration, register_irq_handler};
+
+#[cfg(feature = "fs-ng")]
+mod root;
+#[cfg(any(feature = "fs-ng", test))]
+pub(crate) mod volume;
+
+#[cfg(feature = "fs-ng")]
+struct FsNgBlockDevice {
+    _irq: Option<BlockIrqRegistration>,
+    block: ax_driver::block::Block,
+}
+
+#[cfg(feature = "fs-ng")]
+impl FsNgBlockDevice {
+    fn new(mut block: ax_driver::block::Block) -> Self {
+        let irq = register_irq_handler(&mut block);
+        Self { _irq: irq, block }
+    }
+}
+
+#[cfg(feature = "fs-ng")]
+impl ax_fs_ng::FsBlockDevice for FsNgBlockDevice {
+    fn name(&self) -> &str {
+        self.block.name()
+    }
+
+    fn num_blocks(&self) -> u64 {
+        self.block.num_blocks()
+    }
+
+    fn block_size(&self) -> usize {
+        self.block.block_size()
+    }
+
+    fn read_block(&mut self, block_id: u64, buf: &mut [u8]) -> ax_errno::AxResult {
+        self.block.read_block(block_id, buf)
+    }
+
+    fn write_block(&mut self, block_id: u64, buf: &[u8]) -> ax_errno::AxResult {
+        self.block.write_block(block_id, buf)
+    }
+
+    fn flush(&mut self) -> ax_errno::AxResult {
+        self.block.flush()
+    }
 }
 
 #[cfg(all(feature = "fs-ng", feature = "plat-dyn"))]
 pub(crate) fn init_dyn_fs_ng(bootargs: Option<&str>) {
-    #[cfg(target_os = "none")]
     init_fs_ng_from_blocks(take_block_devices(), bootargs);
-
-    #[cfg(not(target_os = "none"))]
-    let _ = bootargs;
 }
 
 #[cfg(all(feature = "fs-ng", not(feature = "plat-dyn")))]
@@ -67,17 +131,15 @@ pub(crate) fn init_static_fs_ng() {
     init_fs_ng_from_blocks(take_block_devices(), None);
 }
 
-#[cfg(all(feature = "fs-ng", any(not(feature = "plat-dyn"), target_os = "none")))]
+#[cfg(feature = "fs-ng")]
 fn take_block_devices() -> Vec<ax_driver::block::Block> {
-    let mut devices = ax_driver::block::take_block_devices();
-    register_irq_handlers(&mut devices);
-    devices
+    ax_driver::block::take_block_devices()
 }
 
-#[cfg(all(feature = "fs-ng", any(not(feature = "plat-dyn"), target_os = "none")))]
+#[cfg(feature = "fs-ng")]
 fn init_fs_ng_from_blocks(blocks: Vec<ax_driver::block::Block>, bootargs: Option<&str>) {
     let block_devs = blocks.into_iter().map(|dev| {
-        alloc::boxed::Box::new(FsNgBlockDevice(dev))
+        alloc::boxed::Box::new(FsNgBlockDevice::new(dev))
             as alloc::boxed::Box<dyn ax_fs_ng::FsBlockDevice>
     });
     let root_spec = root::parse_root_spec(bootargs);

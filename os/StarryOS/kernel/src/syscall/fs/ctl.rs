@@ -10,23 +10,29 @@ use core::{
     time::Duration,
 };
 
-use ax_errno::{AxError, AxResult, LinuxError};
+use ax_errno::{AxError, AxResult};
 use ax_fs::{FS_CONTEXT, FsContext};
 use ax_runtime::hal::time::wall_time;
 use ax_task::current;
 use axfs_ng_vfs::{DeviceId, MetadataUpdate, NodePermission, NodeType, path::Path};
 use linux_raw_sys::{
     general::*,
-    ioctl::{BLKGETSIZE64, BLKRAGET, BLKSSZGET, FIOASYNC, FIONBIO, TIOCGWINSZ},
+    ioctl::{FIOASYNC, FIONBIO},
 };
 use starry_vm::{VmPtr, vm_write_slice};
 
 use crate::{
-    file::{Directory, FileLike, fd_is_path, get_file_like, resolve_at, with_fs},
+    file::{Directory, FD_TABLE, FileLike, fd_is_path, get_file_like, resolve_at, with_fs},
     mm::vm_load_string,
     task::AsThread,
     time::TimeValueLike,
 };
+
+/// `FIOCLEX` / `FIONCLEX`: set / clear the close-on-exec flag on a file descriptor
+/// via `ioctl` (the ioctl spelling of `fcntl(fd, F_SETFD, ...)`). libc/musl and CPython
+/// use these on freshly-opened fds; Linux implements them generically for any fd.
+const FIOCLEX: u32 = 0x5451;
+const FIONCLEX: u32 = 0x5450;
 
 fn path_info_at(dirfd: i32, path: &str) -> AxResult<(String, bool)> {
     with_fs(dirfd, |fs| {
@@ -51,16 +57,27 @@ pub fn sys_ioctl(fd: i32, cmd: u32, arg: usize) -> AxResult<isize> {
         f.set_async_mode(val != 0)?;
         return Ok(0);
     }
+    // FIOCLEX/FIONCLEX are fd-table operations (close-on-exec), not device commands —
+    // handle them here so any fd (not just ttys) accepts them, as Linux does. Without
+    // this, curses/CPython (glances) hit "Unsupported ioctl command".
+    if cmd == FIOCLEX || cmd == FIONCLEX {
+        FD_TABLE
+            .write()
+            .get_mut(fd as _)
+            .ok_or(AxError::BadFileDescriptor)?
+            .cloexec = cmd == FIOCLEX;
+        return Ok(0);
+    }
     f.ioctl(cmd, arg)
         .map(|result| result as isize)
         .inspect_err(|err| {
             if *err == AxError::NotATty {
-                // Applications commonly probe non-terminal/blobk fds with
-                // these ioctls; suppress noise.
-                if matches!(cmd, TIOCGWINSZ | BLKGETSIZE64 | BLKRAGET | BLKSSZGET) {
-                    return;
-                }
-                warn!("Unsupported ioctl command: {cmd} for fd: {fd}");
+                // `NotATty` is a legitimate negative answer to the isatty/termios/winsize/
+                // console probes (TCGETS, KDGKBTYPE, TIOCGPGRP, ...) that libc, ncurses and
+                // CPython fire at every fd — not an unimplemented command. Log at debug
+                // only: a warn per probe spams the serial console and visibly corrupts
+                // full-screen TUIs (htop/glances) drawing on that same console.
+                debug!("ioctl {cmd} on non-tty fd {fd} -> ENOTTY (probe)");
             }
         })
 }
@@ -148,11 +165,14 @@ pub fn sys_mkdirat(dirfd: i32, path: *const c_char, mode: u32) -> AxResult<isize
 
     let mode = mode & !thread.proc_data.umask();
     let mode = NodePermission::from_bits_truncate(mode as u16);
+    let cred = thread.cred();
+    let uid = cred.fsuid;
+    let gid = cred.fsgid;
 
     // call tp:trace_sys_mkdirat
     trace_sys_mkdirat(&path, mode.bits());
 
-    let result = with_fs(dirfd, |fs| match fs.create_dir(&path, mode) {
+    let result = with_fs(dirfd, |fs| match fs.create_dir(&path, mode, uid, gid) {
         Ok(_) => Ok(0),
         // mkdir on an existing path should report EEXIST.
         // Use no-follow lookup so dangling symlinks are treated as existing
@@ -196,12 +216,17 @@ pub fn sys_mknodat(dirfd: i32, path: *const c_char, mode: u32, dev: u64) -> Resu
         _ => return Err(AxError::InvalidInput),
     };
 
+    let cred = thread.cred();
+    let uid = cred.fsuid;
+    let gid = cred.fsgid;
     let res = with_fs(dirfd, |fs| {
         let (dir, name) = fs.resolve_nonexistent(Path::new(&path))?;
         let loc = dir.create(
             name,
             node_type,
             NodePermission::from_bits_truncate(perm as u16),
+            uid,
+            gid,
         )?;
 
         // If device node, set rdev via update_metadata
@@ -374,6 +399,7 @@ pub fn sys_unlinkat(dirfd: i32, path: *const c_char, flags: usize) -> AxResult<i
     if result.is_ok()
         && let Some((path, is_dir)) = deleted
     {
+        // Notify watchers only after the filesystem deletion has succeeded.
         crate::file::inotify::notify_delete_path(&path, is_dir);
     }
     result
@@ -420,8 +446,11 @@ pub fn sys_symlinkat(
     let linkpath = vm_load_string(linkpath)?;
     debug!("sys_symlinkat <= target: {target:?}, new_dirfd: {new_dirfd}, linkpath: {linkpath:?}");
 
+    let cred = current().as_thread().cred();
+    let uid = cred.fsuid;
+    let gid = cred.fsgid;
     with_fs(new_dirfd, |fs| {
-        fs.symlink(target, linkpath)?;
+        fs.symlink(target, linkpath, uid, gid)?;
         Ok(0)
     })
 }
@@ -740,6 +769,7 @@ pub fn sys_renameat(
     sys_renameat2(old_dirfd, old_path, new_dirfd, new_path, 0)
 }
 
+// Rename a path, currently supporting Linux RENAME_NOREPLACE.
 pub fn sys_renameat2(
     old_dirfd: i32,
     old_path: *const c_char,
@@ -773,132 +803,9 @@ pub fn sys_renameat2(
         }
     }
 
+    // Propagate the filesystem errno directly to match renameat2 callers.
     old_dir.rename(&old_name, &new_dir, &new_name)?;
     Ok(0)
-}
-
-// xattr syscall stubs.
-//
-// rsext4 does not support extended attributes, so these are minimal stubs
-// that satisfy the POSIX contract without touching the filesystem.
-//
-// This is required for pip uninstall: when /tmp is a separate tmpfs,
-// os.rename() returns EXDEV (cross-device), forcing shutil.copy2() to
-// fall back to a copy path that calls listxattr/getxattr/setxattr via
-// copystat() → _copyxattr(). Since listxattr returns 0 (empty), the
-// copy loop body never executes, so setxattr/removexattr are never called.
-
-// TODO: xattr stub — not fully implemented, rsext4 has no extended attributes.
-/// listxattr(path, list, size) — returns 0 (no extended attributes).
-pub fn sys_listxattr(path: *const c_char, _list: *mut u8, _size: usize) -> AxResult<isize> {
-    let _path = vm_load_string(path)?;
-    Ok(0)
-}
-
-// TODO: xattr stub — not fully implemented, rsext4 has no extended attributes.
-/// llistxattr(path, list, size) — same as listxattr but does not follow symlinks.
-pub fn sys_llistxattr(path: *const c_char, _list: *mut u8, _size: usize) -> AxResult<isize> {
-    let _path = vm_load_string(path)?;
-    Ok(0)
-}
-
-// TODO: xattr stub — not fully implemented, rsext4 has no extended attributes.
-/// flistxattr(fd, list, size) — fd-based variant, returns 0.
-pub fn sys_flistxattr(_fd: i32, _list: *mut u8, _size: usize) -> AxResult<isize> {
-    Ok(0)
-}
-
-// TODO: xattr stub — not fully implemented, rsext4 has no extended attributes.
-/// getxattr(path, name, value, size) — returns ENODATA (no such attribute).
-pub fn sys_getxattr(
-    path: *const c_char,
-    _name: *const c_char,
-    _value: *mut u8,
-    _size: usize,
-) -> AxResult<isize> {
-    let _path = vm_load_string(path)?;
-    Err(AxError::from(LinuxError::ENODATA))
-}
-
-// TODO: xattr stub — not fully implemented, rsext4 has no extended attributes.
-/// lgetxattr — same as getxattr but does not follow symlinks.
-pub fn sys_lgetxattr(
-    path: *const c_char,
-    _name: *const c_char,
-    _value: *mut u8,
-    _size: usize,
-) -> AxResult<isize> {
-    let _path = vm_load_string(path)?;
-    Err(AxError::from(LinuxError::ENODATA))
-}
-
-// TODO: xattr stub — not fully implemented, rsext4 has no extended attributes.
-/// fgetxattr — fd-based variant, returns ENODATA.
-pub fn sys_fgetxattr(
-    _fd: i32,
-    _name: *const c_char,
-    _value: *mut u8,
-    _size: usize,
-) -> AxResult<isize> {
-    Err(AxError::from(LinuxError::ENODATA))
-}
-
-// TODO: xattr stub — not fully implemented, rsext4 has no extended attributes.
-/// setxattr — returns EOPNOTSUPP (filesystem does not support xattr).
-pub fn sys_setxattr(
-    path: *const c_char,
-    _name: *const c_char,
-    _value: *const u8,
-    _size: usize,
-    _flags: i32,
-) -> AxResult<isize> {
-    let _path = vm_load_string(path)?;
-    Err(AxError::from(LinuxError::EOPNOTSUPP))
-}
-
-// TODO: xattr stub — not fully implemented, rsext4 has no extended attributes.
-/// lsetxattr — same as setxattr but does not follow symlinks.
-pub fn sys_lsetxattr(
-    path: *const c_char,
-    _name: *const c_char,
-    _value: *const u8,
-    _size: usize,
-    _flags: i32,
-) -> AxResult<isize> {
-    let _path = vm_load_string(path)?;
-    Err(AxError::from(LinuxError::EOPNOTSUPP))
-}
-
-// TODO: xattr stub — not fully implemented, rsext4 has no extended attributes.
-/// fsetxattr — fd-based variant, returns EOPNOTSUPP.
-pub fn sys_fsetxattr(
-    _fd: i32,
-    _name: *const c_char,
-    _value: *const u8,
-    _size: usize,
-    _flags: i32,
-) -> AxResult<isize> {
-    Err(AxError::from(LinuxError::EOPNOTSUPP))
-}
-
-// TODO: xattr stub — not fully implemented, rsext4 has no extended attributes.
-/// removexattr — returns EOPNOTSUPP (filesystem does not support xattr).
-pub fn sys_removexattr(path: *const c_char, _name: *const c_char) -> AxResult<isize> {
-    let _path = vm_load_string(path)?;
-    Err(AxError::from(LinuxError::EOPNOTSUPP))
-}
-
-// TODO: xattr stub — not fully implemented, rsext4 has no extended attributes.
-/// lremovexattr — same as removexattr but does not follow symlinks.
-pub fn sys_lremovexattr(path: *const c_char, _name: *const c_char) -> AxResult<isize> {
-    let _path = vm_load_string(path)?;
-    Err(AxError::from(LinuxError::EOPNOTSUPP))
-}
-
-// TODO: xattr stub — not fully implemented, rsext4 has no extended attributes.
-/// fremovexattr — fd-based variant, returns EOPNOTSUPP.
-pub fn sys_fremovexattr(_fd: i32, _name: *const c_char) -> AxResult<isize> {
-    Err(AxError::from(LinuxError::EOPNOTSUPP))
 }
 
 pub fn sys_sync() -> AxResult<isize> {

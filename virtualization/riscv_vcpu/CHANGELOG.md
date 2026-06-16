@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.12](https://github.com/rcore-os/tgoskits/compare/riscv_vcpu-v0.5.11...riscv_vcpu-v0.5.12) - 2026-06-11
+
+### Fixed
+
+- fix typos in code and comments across the codebase ([#1206](https://github.com/rcore-os/tgoskits/pull/1206))
+
+## [0.5.11](https://github.com/rcore-os/tgoskits/compare/riscv_vcpu-v0.5.10...riscv_vcpu-v0.5.11) - 2026-06-09
+
+### Other
+
+- Refactor Axvisor to unify ArceOS API and improve modularity ([#1019](https://github.com/rcore-os/tgoskits/pull/1019))
+
+## [0.5.10](https://github.com/rcore-os/tgoskits/compare/riscv_vcpu-v0.5.9...riscv_vcpu-v0.5.10) - 2026-06-03
+
+### Added
+
+- *(riscv64)* support dynamic platform on QEMU and SG2002 ([#961](https://github.com/rcore-os/tgoskits/pull/961))
+
+### Fixed
+
+- *(repo)* normalize allocator and RISC-V dependencies ([#1021](https://github.com/rcore-os/tgoskits/pull/1021))
+
+### Other
+
+- Refactor code structure for improved readability and maintainability ([#982](https://github.com/rcore-os/tgoskits/pull/982))
+
 ## [0.5.9](https://github.com/rcore-os/tgoskits/compare/riscv_vcpu-v0.5.8...riscv_vcpu-v0.5.9) - 2026-05-22
 
 ### Fixed

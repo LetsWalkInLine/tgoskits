@@ -50,13 +50,11 @@ sudo apt install qemu-system-arm qemu-system-riscv64 qemu-system-x86
 
 ```
 os/arceos/
-├── modules/          # 内核模块（17 个）
+├── modules/          # 内核模块
 │   ├── axhal/        # 硬件抽象层
 │   ├── axtask/       # 任务/线程管理 + 调度器
 │   ├── axalloc/      # 内存分配器
 │   ├── axdriver/     # 统一设备驱动框架
-│   ├── axnet/        # 网络（legacy, smoltcp）
-│   ├── axnet-ng/     # 网络（next-gen）
 │   ├── axfs/         # 文件系统（legacy）
 │   ├── axfs-ng/      # 文件系统（next-gen, ext4/fat）
 │   ├── axlog/        # 多级日志
@@ -75,12 +73,20 @@ os/arceos/
 ├── ulib/             # 用户侧库
 │   ├── axstd/        # Rust std 风格接口
 │   └── axlibc/       # C libc 接口
-└── examples/         # 示例应用
-    ├── helloworld/
-    ├── httpserver/
-    ├── httpclient/
-    ├── shell/
-    └── ...           # 含 C 示例（helloworld-c 等）
+
+net/
+└── ax-net/           # 统一网络栈（TCP/UDP/raw/Unix/vsock/DNS/DHCP）
+
+apps/arceos/
+├── helloworld/
+├── httpserver/
+├── httpclient/
+├── io_test/
+├── thread_test/
+├── tokio_test/
+├── arce_agent/
+├── shell/
+└── helloworld-myplat/
 ```
 
 ---
@@ -122,8 +128,8 @@ pub unsafe fn rust_main() {
     ax_task::init_scheduler();
     #[cfg(feature = "fs-ng")]
     ax_fs_ng::init_filesystems(/* ... */);
-    #[cfg(feature = "net-ng")]
-    ax_net_ng::init_network(/* ... */);
+    #[cfg(feature = "net")]
+    ax_net::init_network(/* ... */);
     // ...
     main();
 }
@@ -210,7 +216,7 @@ ax-mymod = { path = "../../modules/axmymod", optional = true }
 **7) 验证**
 
 ```bash
-cargo xtask arceos qemu --package ax-helloworld --arch aarch64 --features mymod
+cargo xtask arceos qemu --package arceos-helloworld --arch aarch64 --features mymod
 ```
 
 ### 3.3 Feature 驱动编译
@@ -252,12 +258,12 @@ net = ["alloc", "paging", "ax-driver/virtio-net", "dep:ax-net", "ax-runtime/net"
 
 | 改动类型 | 验证命令 | 扩展验证 |
 |----------|---------|---------|
-| 基础 crate（`axerrno`, `kspin`, `page_table_multiarch`） | `cargo test -p <crate>` | `cargo xtask arceos qemu --package ax-helloworld --arch riscv64` |
-| HAL（`axhal`） | `cargo xtask arceos qemu --package ax-helloworld --arch aarch64` | 多架构验证 |
-| 调度器（`axtask`） | `cargo xtask arceos qemu --package ax-helloworld --arch riscv64` | `cargo xtask arceos test qemu --target riscv64gc-unknown-none-elf` |
-| 网络（`axnet` / `axnet-ng`） | `cargo xtask arceos qemu --package ax-httpserver --arch aarch64 --net` | 检查 TCP 连接和吞吐 |
-| 文件系统（`axfs` / `axfs-ng`） | `cargo xtask arceos qemu --package ax-shell --arch aarch64 --blk` | 检查文件读写 |
-| 驱动（`axdriver`） | `cargo xtask arceos qemu --package ax-helloworld --arch aarch64` | 启用对应设备 `--blk` / `--net` |
+| 基础 crate（`axerrno`, `kspin`, `page_table_multiarch`） | `cargo test -p <crate>` | `cargo xtask arceos qemu --package arceos-helloworld --arch riscv64` |
+| HAL（`axhal`） | `cargo xtask arceos qemu --package arceos-helloworld --arch aarch64` | 多架构验证 |
+| 调度器（`axtask`） | `cargo xtask arceos qemu --package arceos-helloworld --arch riscv64` | `cargo xtask arceos test qemu --target riscv64gc-unknown-none-elf` |
+| 网络（`axnet` / `axnet`） | `cargo xtask arceos qemu --package arceos-httpserver --arch aarch64 --net` | 检查 TCP 连接和吞吐 |
+| 文件系统（`axfs` / `axfs-ng`） | `cargo xtask arceos qemu --package arceos-shell --arch aarch64 --blk` | 检查文件读写 |
+| 驱动（`axdriver`） | `cargo xtask arceos qemu --package arceos-helloworld --arch aarch64` | 启用对应设备 `--blk` / `--net` |
 
 ---
 
@@ -268,7 +274,7 @@ net = ["alloc", "paging", "ax-driver/virtio-net", "dep:ax-net", "ax-runtime/net"
 **1) 创建目录和文件**
 
 ```
-os/arceos/examples/myapp/
+apps/arceos/myapp/
 ├── Cargo.toml
 └── src/
     └── main.rs
@@ -278,43 +284,38 @@ os/arceos/examples/myapp/
 
 ```toml
 [package]
-name = "myapp"
+name = "arceos-myapp"
 version = "0.1.0"
 edition.workspace = true
 
+[features]
+default = []
+arceos = ["dep:ax-std"]
+
 [dependencies]
-ax-std.workspace = true
+ax-std = { workspace = true, optional = true }
+
+[package.metadata.axstd]
+features = ["log-level-debug"]
 ```
 
 **3) `src/main.rs`**
 
 ```rust
-#![cfg_attr(any(feature = "ax-std", target_os = "none"), no_std)]
-#![cfg_attr(any(feature = "ax-std", target_os = "none"), no_main)]
+#[cfg(feature = "arceos")]
+use ax_std as _;
 
-// 条件编译宏：仅在目标平台编译 app 代码
-#[cfg(any(not(target_os = "none"), feature = "ax-std"))]
-macro_rules! app { ($($item:item)*) => { $($item)* }; }
-#[cfg(not(any(not(target_os = "none"), feature = "ax-std")))]
-macro_rules! app { ($($item:item)*) => {}; }
-
-app! {
-    #[cfg(feature = "ax-std")]
-    use ax_std::println;
-
-    #[cfg_attr(feature = "ax-std", unsafe(no_mangle))]
-    fn main() {
-        println!("Hello from myapp!");
-    }
+fn main() {
+    println!("Hello from myapp!");
 }
 ```
 
-> 所有 Rust 示例都使用相同的 `app!` 宏模式来处理条件编译。
+> `arceos` feature 由 axbuild 的 std-aware 构建流程注入；应用代码保持普通 Rust `std` app 风格。
 
 **4) 验证**
 
 ```bash
-cargo xtask arceos qemu --package myapp --arch aarch64
+cargo xtask arceos qemu --package arceos-myapp --arch aarch64
 ```
 
 ### 4.2 使用 `axstd` 的 `std` 风格 API
@@ -322,7 +323,7 @@ cargo xtask arceos qemu --package myapp --arch aarch64
 对于复杂应用（如 `httpserver`），`axstd` 提供了接近 Rust `std` 的 API：
 
 ```rust
-use ax_std::{net::TcpListener, io::Read, thread, time::Duration};
+use std::{io::Read, net::TcpListener, thread, time::Duration};
 
 fn main() {
     let listener = TcpListener::bind("0.0.0.0:8080").unwrap();
@@ -336,25 +337,29 @@ fn main() {
 }
 ```
 
-对应 `Cargo.toml` 需要启用 feature：
+对应 `Cargo.toml` 需要通过 `arceos` feature 为 axbuild 注入网络能力：
 
 ```toml
+[features]
+default = []
+arceos = ["dep:ax-std", "ax-std/net"]
+
 [dependencies]
-ax-std = { workspace = true, features = ["net"] }
+ax-std = { workspace = true, optional = true }
 ```
 
-### 4.3 新增 C 示例应用
+### 4.3 C 应用覆盖
 
-C 示例放在 `os/arceos/examples/<name>-c/`。仓库中已有 `helloworld-c`、`httpclient-c`、`httpserver-c` 作为参考。C 应用通过 `axlibc` 获得标准 C 库接口。
+C 应用覆盖由 `test-suit/arceos/c` 维护；`apps/arceos` 只保留 Rust std app。
 
 ### 4.4 Feature 与应用对应关系
 
 | 功能需求 | 需要启用的 feature | 示例命令 |
 |----------|-------------------|---------|
-| 最小运行 | `ax-std` | `--package ax-helloworld` |
+| 最小运行 | `ax-std` | `--package arceos-helloworld` |
 | 多任务 | `multitask` | 在应用 Cargo.toml 中启用 |
-| 网络 | `net` 或 `net-ng` | `--package ax-httpserver` |
-| 文件系统 | `fs` 或 `fs-ng` | `--package ax-shell` |
+| 网络 | `net` | `--package arceos-httpserver` |
+| 文件系统 | `fs` 或 `fs-ng` | `--package arceos-shell` |
 | 多核 | `smp` | `--arch aarch64` + `SMP=4` |
 | PCI 设备 | `bus-pci` | 默认 |
 | MMIO 设备 | `bus-mmio` | `--features bus-mmio` |
@@ -365,10 +370,10 @@ C 示例放在 `os/arceos/examples/<name>-c/`。仓库中已有 `helloworld-c`�
 
 ### 5.1 平台 crate 结构
 
-以 `axplat-aarch64-qemu-virt` 为例：
+以 `ax-plat-riscv64-sg2002` 为例：
 
 ```
-platforms/ax-plat-aarch64-qemu-virt/
+platforms/ax-plat-riscv64-sg2002/
 ├── Cargo.toml
 ├── axconfig.toml     # 平台配置（内存布局、SMP 数等）
 ├── build.rs          # 构建脚本
@@ -388,20 +393,15 @@ platforms/ax-plat-aarch64-qemu-virt/
 |------|------|
 | `platforms/` | 工作区内 `ax-plat-*` 平台 crate |
 | `platforms/axplat-dyn/` | 动态平台加载（设备树驱动） |
-| `platforms/ax-plat-x86-qemu-q35/` | x86_64 QEMU Q35 独立平台 |
 
 已有平台：
 
 | 平台 | 架构 | 目标硬件 |
 |------|------|---------|
-| `axplat-aarch64-qemu-virt` | aarch64 | QEMU virt |
-| `axplat-riscv64-qemu-virt` | riscv64 | QEMU virt |
-| `axplat-x86-pc` | x86_64 | QEMU Q35 / 物理 PC |
+| `ax-plat-riscv64-sg2002` | riscv64 | SG2002 板级平台 |
 | `axplat-loongarch64-qemu-virt` | loongarch64 | QEMU virt |
-| `axplat-aarch64-raspi` | aarch64 | Raspberry Pi |
-| `axplat-aarch64-phytium-pi` | aarch64 | 飞腾 Pi |
-| `axplat-aarch64-peripherals` | aarch64 | 通用外设 |
-| `axplat-aarch64-bsta1000b` | aarch64 | BST A1000B |
+
+AArch64、RISC-V QEMU 和 x86_64 QEMU 默认平台由 `axplat-dyn` 通过设备树/运行时信息加载，不再维护仓库内静态平台 crate。
 
 ### 5.3 添加新平台
 
@@ -412,7 +412,7 @@ platforms/ax-plat-aarch64-qemu-virt/
 5. 验证：
 
 ```bash
-cargo xtask arceos qemu --package ax-helloworld --arch <arch> --platform <platform-name>
+cargo xtask arceos qemu --package arceos-helloworld --arch <arch> --platform <platform-name>
 ```
 
 ---
@@ -453,7 +453,6 @@ C 测试位于 `test-suit/arceos/c/`：helloworld, httpclient, memtest, pthread�
 features = ["ax-std"]
 log = "Warn"
 max_cpu_num = 4
-plat_dyn = true
 
 [env]
 AX_IP = "10.0.2.15"
@@ -592,27 +591,27 @@ ArceOS 支持 4 种架构。改动核心模块后建议在至少 2 个架构上�
 
 | 架构 | 编译目标 | QEMU 启动命令 |
 |------|---------|-------------|
-| aarch64 | `aarch64-unknown-none-softfloat` | `cargo xtask arceos qemu --package ax-helloworld --arch aarch64` |
-| riscv64 | `riscv64gc-unknown-none-elf` | `cargo xtask arceos qemu --package ax-helloworld --arch riscv64` |
-| x86_64 | `x86_64-unknown-none` | `cargo xtask arceos qemu --package ax-helloworld --arch x86_64` |
-| loongarch64 | `loongarch64-unknown-none-softfloat` | `cargo xtask arceos qemu --package ax-helloworld --arch loongarch64` |
+| aarch64 | `aarch64-unknown-none-softfloat` | `cargo xtask arceos qemu --package arceos-helloworld --arch aarch64` |
+| riscv64 | `riscv64gc-unknown-none-elf` | `cargo xtask arceos qemu --package arceos-helloworld --arch riscv64` |
+| x86_64 | `x86_64-unknown-none` | `cargo xtask arceos qemu --package arceos-helloworld --arch x86_64` |
+| loongarch64 | `loongarch64-unknown-none-softfloat` | `cargo xtask arceos qemu --package arceos-helloworld --arch loongarch64` |
 
 推荐的最小验证矩阵：
 
 ```bash
 # 改动基础 crate
 cargo test -p <crate>
-cargo xtask arceos qemu --package ax-helloworld --arch aarch64
-cargo xtask arceos qemu --package ax-helloworld --arch riscv64
+cargo xtask arceos qemu --package arceos-helloworld --arch aarch64
+cargo xtask arceos qemu --package arceos-helloworld --arch riscv64
 
 # 改动驱动/设备
-cargo xtask arceos qemu --package ax-helloworld --arch aarch64
-cargo xtask arceos qemu --package ax-helloworld --arch riscv64
-cargo xtask arceos qemu --package ax-helloworld --arch x86_64
+cargo xtask arceos qemu --package arceos-helloworld --arch aarch64
+cargo xtask arceos qemu --package arceos-helloworld --arch riscv64
+cargo xtask arceos qemu --package arceos-helloworld --arch x86_64
 
 # 改动调度器/多核
-cargo xtask arceos qemu --package ax-helloworld --arch aarch64  # SMP=4
-cargo xtask arceos qemu --package ax-helloworld --arch riscv64  # SMP=4
+cargo xtask arceos qemu --package arceos-helloworld --arch aarch64  # SMP=4
+cargo xtask arceos qemu --package arceos-helloworld --arch riscv64  # SMP=4
 ```
 
 ---
@@ -635,10 +634,10 @@ cargo xtask arceos qemu --package ax-helloworld --arch riscv64  # SMP=4
 
 ```bash
 # 网络
-cargo xtask arceos qemu --package ax-httpserver --arch aarch64 --net
+cargo xtask arceos qemu --package arceos-httpserver --arch aarch64 --net
 
 # 块设备
-cargo xtask arceos qemu --package ax-shell --arch aarch64 --blk
+cargo xtask arceos qemu --package arceos-shell --arch aarch64 --blk
 ```
 
 ### Q: 如何确认改动不影响 StarryOS / Axvisor？
@@ -647,7 +646,7 @@ cargo xtask arceos qemu --package ax-shell --arch aarch64 --blk
 
 ```bash
 # ArceOS 验证
-cargo xtask arceos qemu --package ax-helloworld --arch aarch64
+cargo xtask arceos qemu --package arceos-helloworld --arch aarch64
 
 # StarryOS 验证
 cargo xtask starry qemu --arch riscv64

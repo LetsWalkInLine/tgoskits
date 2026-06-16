@@ -24,8 +24,10 @@
 //!
 //! - [`BaseDeviceOps`]: The core trait that all emulated devices must implement.
 //! - [`EmuDeviceType`]: Enumeration representing the type of emulator devices
-//!   (re-exported from `axvmconfig` crate).
+//!   (re-exported from `axvm-types` crate).
 //! - [`EmulatedDeviceConfig`]: Configuration structure for device initialization.
+//! - [`IrqLine`] and [`IrqSink`]: Architecture-independent interrupt line
+//!   signaling.
 //! - Trait aliases for specific device types:
 //!   - [`BaseMmioDeviceOps`]: For MMIO (Memory-Mapped I/O) devices.
 //!   - [`BaseSysRegDeviceOps`]: For system register devices.
@@ -37,8 +39,8 @@
 //! trait with the appropriate address range type:
 //!
 //! ```rust,ignore
-//! use axdevice_base::{BaseDeviceOps, EmuDeviceType};
-//! use axaddrspace::{GuestPhysAddrRange, device::AccessWidth};
+//! use axdevice_base::{AccessWidth, BaseDeviceOps, EmuDeviceType};
+//! use axvm_types::{GuestPhysAddr, GuestPhysAddrRange};
 //! use ax_errno::AxResult;
 //!
 //! struct MyDevice {
@@ -84,15 +86,21 @@
 
 extern crate alloc;
 
+mod device;
+mod irq;
+
 use alloc::{string::String, sync::Arc, vec::Vec};
 use core::any::Any;
 
-use ax_errno::AxResult;
-use axaddrspace::{
-    GuestPhysAddrRange,
-    device::{AccessWidth, DeviceAddrRange, PortRange, SysRegAddrRange},
+pub use ax_errno::AxResult;
+pub use axvm_types::{
+    EmulatedDeviceType as EmuDeviceType, GuestPhysAddr, GuestPhysAddrRange, InterruptTriggerMode,
+    IrqLineId,
 };
-pub use axvmconfig::EmulatedDeviceType as EmuDeviceType;
+pub use device::{
+    AccessWidth, DeviceAddr, DeviceAddrRange, Port, PortRange, SysRegAddr, SysRegAddrRange,
+};
+pub use irq::{IrqLine, IrqSink};
 
 /// Represents the configuration of an emulated device for a virtual machine.
 ///

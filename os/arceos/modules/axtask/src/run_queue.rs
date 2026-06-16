@@ -56,13 +56,13 @@ static mut RUN_QUEUES: [MaybeUninit<&'static mut AxRunQueue>; ax_config::plat::M
 #[allow(clippy::declare_interior_mutable_const)] // It's ok because it's used only for initialization `RUN_QUEUES`.
 const ARRAY_REPEAT_VALUE: MaybeUninit<&'static mut AxRunQueue> = MaybeUninit::uninit();
 
-#[cfg(target_os = "none")]
+#[cfg(not(feature = "host-test"))]
 fn main_task_stack() -> TaskStack {
     let (stack_ptr, stack_size) = ax_hal::mem::boot_stack_bounds(this_cpu_id());
     TaskStack::borrowed(stack_ptr, stack_size, TASK_STACK_ALIGN)
 }
 
-#[cfg(not(target_os = "none"))]
+#[cfg(feature = "host-test")]
 fn main_task_stack() -> TaskStack {
     TaskStack::alloc(ax_config::TASK_STACK_SIZE)
 }
@@ -189,8 +189,14 @@ pub(crate) fn select_run_queue<G: BaseGuard>(task: &AxTaskRef) -> AxRunQueueRef<
     }
     #[cfg(feature = "smp")]
     {
-        // When SMP is enabled, select the run queue based on the task's CPU affinity and load balance.
-        let index = select_run_queue_index(task.cpumask());
+        // When SMP is enabled, prefer the current CPU to keep the task's
+        // cache warm. Fall back to round-robin only when affinity forbids it.
+        let current_cpu = this_cpu_id();
+        let index = if task.cpumask().get(current_cpu) {
+            current_cpu
+        } else {
+            select_run_queue_index(task.cpumask())
+        };
         AxRunQueueRef {
             inner: get_run_queue(index),
             state: irq_state,
@@ -506,7 +512,7 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
             curr.set_in_wait_queue(true);
             wq_guard.push_back(curr.clone());
         }
-        // Drop the lock of wait queue explictly.
+        // Drop the lock of wait queue explicitly.
         drop(wq_guard);
 
         // Current task's state has been changed to `Blocked` and added to the wait queue.
@@ -549,8 +555,7 @@ impl<G: BaseGuard> CurrentRunQueueRef<'_, G> {
         assert!(curr.is_running());
         assert!(!curr.is_idle());
 
-        let now = ax_hal::time::wall_time();
-        if now < deadline {
+        while ax_hal::time::monotonic_time() < deadline {
             crate::timers::set_alarm_wakeup(deadline, curr.clone());
             curr.set_state(TaskState::Blocked);
             self.inner.resched();
@@ -662,7 +667,7 @@ impl AxRunQueue {
 
     fn switch_to(&mut self, prev_task: CurrentTask, next_task: AxTaskRef) {
         // Make sure that IRQs are disabled by kernel guard or other means.
-        #[cfg(all(target_os = "none", feature = "irq"))] // Note: irq is faked under unit tests.
+        #[cfg(all(feature = "irq", not(feature = "host-test")))]
         assert!(
             !ax_hal::asm::irqs_enabled(),
             "IRQs must be disabled during scheduling"
@@ -697,6 +702,18 @@ impl AxRunQueue {
                 ext.on_enter()
             }
         }
+
+        // `prev_task.state()` must be sampled before the architectural switch:
+        // callers like `exit_current` already set it to `Exited`/`Blocked`,
+        // and that pre-switch state is what `sched:sched_switch` reports.
+        #[cfg(feature = "tracepoint-hooks")]
+        ax_crate_interface::call_interface!(
+            crate::sched_tracepoint::SchedTracepoint::on_sched_switch(
+                prev_task.id().as_u64(),
+                next_task.id().as_u64(),
+                prev_task.state() as u32,
+            )
+        );
 
         unsafe {
             let prev_ctx_ptr = prev_task.ctx_mut_ptr();
@@ -773,11 +790,14 @@ fn gc_entry() {
 #[cfg(feature = "smp")]
 pub(crate) fn migrate_entry(migrated_task: AxTaskRef) {
     let rq = select_run_queue::<ax_kernel_guard::NoPreemptIrqSave>(&migrated_task);
-    migrated_task.set_cpu_id(rq.inner.cpu_id as _);
+    let cpu_id = rq.inner.cpu_id;
+    migrated_task.set_cpu_id(cpu_id as _);
     rq.inner
         .scheduler
         .lock()
-        .put_prev_task(migrated_task, false)
+        .put_prev_task(migrated_task, false);
+    #[cfg(all(feature = "smp", feature = "ipi"))]
+    kick_remote_cpu(cpu_id);
 }
 
 /// Clear the `on_cpu` field of previous task running on this CPU.

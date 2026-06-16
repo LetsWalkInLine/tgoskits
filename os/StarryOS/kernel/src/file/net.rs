@@ -8,7 +8,7 @@ use core::{
 };
 
 use ax_errno::{AxError, AxResult};
-use axnet::{
+use ax_net::{
     RecvOptions, SendOptions, Socket as SocketInner, SocketOps,
     options::{Configurable, GetSocketOption, SetSocketOption},
 };
@@ -24,14 +24,20 @@ use linux_raw_sys::{
 };
 use starry_vm::{VmMutPtr, vm_read_slice, vm_write_slice};
 
-use super::{
-    FileLike, Kstat,
-    packet::{ETH0_IFINDEX, LO_IFINDEX},
+use super::{FileLike, Kstat};
+use crate::{
+    file::{IoDst, IoSrc, get_file_like},
+    syscall::in_root_net_ns,
 };
-use crate::file::{IoDst, IoSrc, get_file_like};
 
+/// Real eth0 MAC address. Uses the QEMU default; TODO: query
+/// `EthernetDriver::mac_address()` from ax_net at init time once the API is
+/// exposed, then replace this with a `static` or `LazyLock`.
+pub const ETH0_REAL_MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
+
+pub(super) const ETH0_IFINDEX: i32 = 2;
+pub(super) const LO_IFINDEX: i32 = 1;
 const ETH0_NAME: &[u8] = b"eth0";
-const ETH0_HWADDR: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
 const LO_NAME: &[u8] = b"lo";
 const ARPHRD_ETHER: u16 = 1;
 const ARPHRD_LOOPBACK: u16 = 772;
@@ -76,24 +82,25 @@ enum NetInterface {
     Loopback,
 }
 
-fn configured_eth0_ipv4() -> [u8; 4] {
-    parse_ipv4_addr(option_env!("AX_IP").unwrap_or("10.0.2.15")).unwrap_or([10, 0, 2, 15])
+fn eth0_ipv4_config() -> AxResult<ax_net::Ipv4InterfaceConfig> {
+    ax_net::eth0_ipv4_config().ok_or(AxError::NoSuchDevice)
 }
 
-fn parse_ipv4_addr(value: &str) -> Option<[u8; 4]> {
-    let mut addr = [0; 4];
-    let mut parts = value.split('.');
-    for octet in &mut addr {
-        let part = parts.next()?;
-        if part.is_empty() {
-            return None;
-        }
-        *octet = part.parse().ok()?;
+fn eth0_ipv4_addr() -> AxResult<[u8; 4]> {
+    Ok(eth0_ipv4_config()?.address.address().octets())
+}
+
+fn ipv4_netmask(prefix_len: u8) -> [u8; 4] {
+    if prefix_len == 0 {
+        return [0; 4];
     }
-    if parts.next().is_some() {
-        return None;
-    }
-    Some(addr)
+    (!0u32 << (32 - prefix_len)).to_be_bytes()
+}
+
+fn ipv4_broadcast(config: ax_net::Ipv4InterfaceConfig) -> [u8; 4] {
+    let ip = u32::from_be_bytes(config.address.address().octets());
+    let mask = u32::from_be_bytes(ipv4_netmask(config.address.prefix_len()));
+    (ip | !mask).to_be_bytes()
 }
 
 fn read_user_bytes<const N: usize>(ptr: *const u8) -> AxResult<[u8; N]> {
@@ -106,7 +113,12 @@ fn read_ifreq_interface(arg: usize) -> AxResult<NetInterface> {
     let name = read_user_bytes::<IFREQ_NAME_LEN>(arg as *const u8)?;
     let end = name.iter().position(|&b| b == 0).unwrap_or(name.len());
     match &name[..end] {
-        ETH0_NAME => Ok(NetInterface::Eth0),
+        ETH0_NAME => {
+            if !in_root_net_ns() {
+                return Err(AxError::NoSuchDevice);
+            }
+            Ok(NetInterface::Eth0)
+        }
         LO_NAME => Ok(NetInterface::Loopback),
         _ => Err(AxError::NoSuchDevice),
     }
@@ -150,8 +162,8 @@ fn write_eth0_ifconf(arg: usize) -> AxResult<()> {
 
     if buf != 0 {
         let mut written = 0;
-        if ifc_len >= IFREQ_COMPAT_LEN as i32 {
-            write_ifconf_entry(buf, written, ETH0_NAME, configured_eth0_ipv4())?;
+        if in_root_net_ns() && ifc_len >= IFREQ_COMPAT_LEN as i32 {
+            write_ifconf_entry(buf, written, ETH0_NAME, eth0_ipv4_addr()?)?;
             written += IFREQ_COMPAT_LEN;
         }
         if ifc_len >= (written + IFREQ_COMPAT_LEN) as i32 {
@@ -255,7 +267,7 @@ impl FileLike for Socket {
             }
             SIOCGIFADDR => {
                 let addr = match read_ifreq_interface(arg)? {
-                    NetInterface::Eth0 => configured_eth0_ipv4(),
+                    NetInterface::Eth0 => eth0_ipv4_addr()?,
                     NetInterface::Loopback => [127, 0, 0, 1],
                 };
                 write_ifreq_sockaddr(arg, addr)?;
@@ -269,24 +281,20 @@ impl FileLike for Socket {
             }
             SIOCGIFBRDADDR => {
                 let addr = match read_ifreq_interface(arg)? {
-                    NetInterface::Eth0 => {
-                        let mut addr = configured_eth0_ipv4();
-                        addr[3] = 255;
-                        addr
-                    }
+                    NetInterface::Eth0 => ipv4_broadcast(eth0_ipv4_config()?),
                     NetInterface::Loopback => [127, 0, 0, 1],
                 };
                 write_ifreq_sockaddr(arg, addr)?;
             }
             SIOCGIFNETMASK => {
                 let addr = match read_ifreq_interface(arg)? {
-                    NetInterface::Eth0 => [255, 255, 255, 0],
+                    NetInterface::Eth0 => ipv4_netmask(eth0_ipv4_config()?.address.prefix_len()),
                     NetInterface::Loopback => [255, 0, 0, 0],
                 };
                 write_ifreq_sockaddr(arg, addr)?;
             }
             SIOCGIFHWADDR => match read_ifreq_interface(arg)? {
-                NetInterface::Eth0 => write_ifreq_hwaddr(arg, ARPHRD_ETHER, &ETH0_HWADDR)?,
+                NetInterface::Eth0 => write_ifreq_hwaddr(arg, ARPHRD_ETHER, &ETH0_REAL_MAC)?,
                 NetInterface::Loopback => write_ifreq_hwaddr(arg, ARPHRD_LOOPBACK, &[])?,
             },
             SIOCGIFMTU => {

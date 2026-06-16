@@ -101,6 +101,32 @@ pub(crate) fn drive_file_paths(qemu: &QemuConfig) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Rewrites all `-drive ...file=...` paths selected by the callback.
+pub(crate) fn rewrite_drive_file_paths<F>(
+    qemu: &mut QemuConfig,
+    mut rewrite: F,
+) -> anyhow::Result<()>
+where
+    F: FnMut(&Path) -> anyhow::Result<Option<PathBuf>>,
+{
+    let mut index = 0;
+    while index + 1 < qemu.args.len() {
+        if qemu.args[index] != "-drive" {
+            index += 1;
+            continue;
+        }
+
+        let drive_arg = qemu.args[index + 1].clone();
+        if let Some(file) = drive_file_value(&drive_arg)
+            && let Some(new_path) = rewrite(Path::new(file))?
+        {
+            qemu.args[index + 1] = replace_drive_file_arg(&drive_arg, &new_path);
+        }
+        index += 2;
+    }
+    Ok(())
+}
+
 fn drive_file_value(drive_arg: &str) -> Option<&str> {
     drive_arg
         .split(',')
@@ -111,6 +137,12 @@ fn drive_id_value(drive_arg: &str) -> Option<&str> {
     drive_arg
         .split(',')
         .find_map(|part| part.strip_prefix("id="))
+}
+
+fn drive_if_value(drive_arg: &str) -> Option<&str> {
+    drive_arg
+        .split(',')
+        .find_map(|part| part.strip_prefix("if="))
 }
 
 fn drive_ref_value(device_arg: &str) -> Option<&str> {
@@ -178,6 +210,7 @@ fn ensure_disk_boot_net_args(qemu: &mut QemuConfig, disk_img: &Path) {
     let mut has_drive = false;
     let mut has_net_device = false;
     let mut has_netdev = false;
+    let mut has_direct_sd_rootfs = false;
     let mut device_drive_ids = Vec::new();
     let mut custom_rootfs_drives = Vec::new();
 
@@ -201,6 +234,11 @@ fn ensure_disk_boot_net_args(qemu: &mut QemuConfig, disk_img: &Path) {
                 if value.starts_with(&drive_prefix) {
                     *value = disk_value.clone();
                     has_drive = true;
+                } else if drive_if_value(value) == Some("sd") && drive_file_value(value).is_some() {
+                    *value = replace_drive_file_arg(value, disk_img);
+                    has_blk_device = true;
+                    has_drive = true;
+                    has_direct_sd_rootfs = true;
                 } else if let (Some(drive_id), Some(_)) =
                     (drive_id_value(value), drive_file_value(value))
                 {
@@ -229,6 +267,9 @@ fn ensure_disk_boot_net_args(qemu: &mut QemuConfig, disk_img: &Path) {
         has_drive = true;
     }
 
+    if has_direct_sd_rootfs && !has_net_device && !has_netdev {
+        return;
+    }
     if !has_blk_device {
         args.push("-device".to_string());
         args.push(wiring.default_block_device.to_string());
@@ -297,6 +338,42 @@ mod tests {
         };
 
         assert!(drive_file_paths(&qemu).is_empty());
+    }
+
+    #[test]
+    fn rewrite_drive_file_paths_replaces_selected_drive_files() {
+        let mut qemu = QemuConfig {
+            args: vec![
+                "-drive".to_string(),
+                "id=disk0,if=none,format=raw,file=/tmp/rootfs.img".to_string(),
+                "-drive".to_string(),
+                "id=usbdisk,if=none,format=raw,snapshot=on,file=/tmp/usb.img".to_string(),
+                "-netdev".to_string(),
+                "user,id=net0,file=/tmp/not-a-drive.img".to_string(),
+            ],
+            ..Default::default()
+        };
+
+        rewrite_drive_file_paths(&mut qemu, |path| {
+            if path == Path::new("/tmp/usb.img") {
+                Ok(Some(PathBuf::from("/cache/rootfs.img")))
+            } else {
+                Ok(None)
+            }
+        })
+        .unwrap();
+
+        assert_eq!(
+            qemu.args,
+            vec![
+                "-drive".to_string(),
+                "id=disk0,if=none,format=raw,file=/tmp/rootfs.img".to_string(),
+                "-drive".to_string(),
+                "id=usbdisk,if=none,format=raw,snapshot=on,file=/cache/rootfs.img".to_string(),
+                "-netdev".to_string(),
+                "user,id=net0,file=/tmp/not-a-drive.img".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -447,6 +524,32 @@ mod tests {
                 "id=nvm,if=none,format=raw,file=/tmp/new-rootfs.img".to_string(),
                 "-device".to_string(),
                 "nvme,serial=starry-nvme-rootfs,drive=nvm".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn ensure_disk_boot_net_patches_sd_drive_without_adding_virtio() {
+        let rootfs = Path::new("/tmp/new-rootfs.img");
+        let mut qemu = QemuConfig {
+            args: vec![
+                "-machine".to_string(),
+                "k230".to_string(),
+                "-drive".to_string(),
+                "if=sd,format=raw,file=/tmp/old-rootfs.img".to_string(),
+            ],
+            ..Default::default()
+        };
+
+        patch_rootfs(&mut qemu, rootfs, RootfsPatchMode::EnsureDiskBootNet);
+
+        assert_eq!(
+            qemu.args,
+            vec![
+                "-machine".to_string(),
+                "k230".to_string(),
+                "-drive".to_string(),
+                "if=sd,format=raw,file=/tmp/new-rootfs.img".to_string(),
             ]
         );
     }

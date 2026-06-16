@@ -36,30 +36,26 @@ macro_rules! model_register {
     };
 }
 
-crate::model_register!(
+model_register!(
     name: "ax-driver macro placeholder",
     level: ProbeLevel::PostKernel,
     priority: ProbePriority::DEFAULT,
     probe_kinds: &[],
 );
 
+mod binding_info;
+mod binding_resolver;
 pub mod error;
-#[cfg(any(
-    all(feature = "serial", plat_dyn),
-    all(feature = "rtc", plat_dyn),
-    all(feature = "rockchip-soc", plat_dyn),
-    all(feature = "rockchip-pm", plat_dyn),
-    all(feature = "sg2002-placeholder", plat_dyn),
-    all(feature = "rockchip-dwmmc", plat_dyn),
-    all(feature = "rockchip-sdhci", plat_dyn),
-    all(feature = "phytium-mci", plat_dyn),
-    all(feature = "rk3588-pcie", plat_dyn),
-    all(feature = "rknpu", plat_dyn),
-    all(feature = "xhci-mmio", target_os = "none", plat_dyn),
-    all(feature = "xhci-pci", target_os = "none"),
-    all(virtio_dev, plat_dyn)
-))]
 pub mod mmio;
+#[cfg(any(
+    feature = "block",
+    feature = "display",
+    feature = "input",
+    feature = "net",
+    feature = "usb",
+    feature = "vsock"
+))]
+mod registration;
 
 #[cfg(feature = "block")]
 pub mod block;
@@ -72,7 +68,10 @@ pub mod net;
 #[cfg(feature = "vsock")]
 pub mod vsock;
 
+#[cfg(feature = "pci")]
 pub mod pci;
+#[cfg(feature = "rga")]
+pub mod rga;
 #[cfg(feature = "rknpu")]
 pub mod rknpu;
 #[cfg(feature = "serial")]
@@ -84,11 +83,19 @@ pub mod serial;
     feature = "rockchip-dwmmc"
 ))]
 pub mod soc;
-#[cfg(feature = "rtc")]
+#[cfg(all(feature = "rtc", plat_dyn))]
 pub mod time;
 #[cfg(feature = "usb")]
 pub mod usb;
 #[cfg(virtio_dev)]
 pub mod virtio;
 
+pub use binding_info::BindingInfo;
+#[cfg(feature = "pci")]
+pub use binding_info::PciIrqRequirement;
+#[cfg(feature = "pci")]
+pub use binding_resolver::binding_info_from_pci;
+pub use binding_resolver::{
+    binding_info_from_acpi, binding_info_from_acpi_route, binding_info_from_fdt,
+};
 pub use error::{Error, Result};

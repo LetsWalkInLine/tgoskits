@@ -7,11 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.14](https://github.com/rcore-os/tgoskits/compare/riscv_vplic-v0.4.13...riscv_vplic-v0.4.14) - 2026-06-09
+
+### Added
+
+- *(std)* unify std-aware ArceOS builds ([#1080](https://github.com/rcore-os/tgoskits/pull/1080))
+
+### Other
+
+- Refactor Axvisor to unify ArceOS API and improve modularity ([#1019](https://github.com/rcore-os/tgoskits/pull/1019))
+
+## [0.4.13](https://github.com/rcore-os/tgoskits/compare/riscv_vplic-v0.4.12...riscv_vplic-v0.4.13) - 2026-06-03
+
+### Other
+
+- Refactor code structure for improved readability and maintainability ([#982](https://github.com/rcore-os/tgoskits/pull/982))
+
 ## [0.4.12](https://github.com/rcore-os/tgoskits/compare/riscv_vplic-v0.4.11...riscv_vplic-v0.4.12) - 2026-05-22
 
 ### Other
 
-- updated the following local packages: ax-errno, axaddrspace, axdevice_base, axvisor_api
+- updated the following local packages: ax-errno, axaddrspace, axdevice_base
 
 ## [0.4.11](https://github.com/rcore-os/tgoskits/compare/riscv_vplic-v0.4.10...riscv_vplic-v0.4.11) - 2026-05-19
 
@@ -23,7 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
-- updated the following local packages: axaddrspace, axdevice_base, riscv-h, axvisor_api
+- updated the following local packages: axaddrspace, axdevice_base, riscv-h
 
 ## [0.4.8](https://github.com/rcore-os/tgoskits/compare/riscv_vplic-v0.4.7...riscv_vplic-v0.4.8) - 2026-04-27
 

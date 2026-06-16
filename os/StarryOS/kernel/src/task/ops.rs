@@ -58,6 +58,8 @@ struct ZombieEntry {
     proc: Arc<Process>,
     cred: Arc<Cred>,
     ptrace_tracer_pid: Option<Pid>,
+    is_clone_child: bool,
+    wait_parent_tid: Pid,
 }
 
 /// Zombie processes: exited but not yet reaped by waitpid().
@@ -161,6 +163,8 @@ pub fn register_zombie(
     proc: Arc<Process>,
     cred: Arc<Cred>,
     ptrace_tracer_pid: Option<Pid>,
+    is_clone_child: bool,
+    wait_parent_tid: Pid,
 ) {
     ZOMBIE_TABLE.write().insert(
         pid,
@@ -168,6 +172,8 @@ pub fn register_zombie(
             proc,
             cred,
             ptrace_tracer_pid,
+            is_clone_child,
+            wait_parent_tid,
         },
     );
 }
@@ -199,6 +205,14 @@ pub fn get_zombie_process(pid: Pid) -> Option<Arc<Process>> {
 /// (and its `cred`) lives until the zombie is reaped by `waitpid`.
 pub fn get_zombie_cred(pid: Pid) -> Option<Arc<Cred>> {
     ZOMBIE_TABLE.read().get(&pid).map(|e| e.cred.clone())
+}
+
+pub fn is_zombie_clone_child(pid: Pid) -> Option<bool> {
+    ZOMBIE_TABLE.read().get(&pid).map(|e| e.is_clone_child)
+}
+
+pub fn zombie_wait_parent_tid(pid: Pid) -> Option<Pid> {
+    ZOMBIE_TABLE.read().get(&pid).map(|e| e.wait_parent_tid)
 }
 
 pub fn traced_zombies_for(tracer_pid: Pid) -> Vec<Arc<Process>> {
@@ -463,11 +477,40 @@ pub fn exit_robust_list(thr: &Thread, head: *const RobustListHead) -> AxResult<(
     Ok(())
 }
 
+// The `sched:sched_process_exit` tracepoint is defined here, next to its sole
+// emission site in `do_exit`, so the event schema and the fast-path call stay
+// together. Registration into the global `.tracepoint` section is by link
+// section, so the definition's module location is immaterial to discovery.
+ktracepoint::define_event_trace!(
+    sched_process_exit,
+    TP_kops(crate::tracepoint::KernelTraceAux),
+    TP_system(sched),
+    TP_PROTO(tid: u64, exit_code: i32),
+    TP_STRUCT__entry {
+        tid: u64,
+        exit_code: i32,
+    },
+    TP_fast_assign {
+        tid: tid,
+        exit_code: exit_code,
+    },
+    TP_ident(__entry),
+    TP_printk({
+        alloc::format!(
+            "tid={} exit_code={}",
+            __entry.tid,
+            __entry.exit_code,
+        )
+    })
+);
+
 pub fn do_exit(exit_code: i32, group_exit: bool) {
     let curr = current();
     let thr = curr.as_thread();
 
     info!("{} exit with code: {}", curr.id_name(), exit_code);
+
+    trace_sched_process_exit(curr.id().as_u64(), exit_code);
 
     // Robust futex ownership must be released before clone-child-tid wakes a
     // pthread joiner; otherwise userspace can observe thread exit before the
@@ -495,6 +538,11 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
     // a non-leader `execve`'s de_thread the two differ, and the thread
     // group is keyed by the user-visible TID.
     if process.exit_thread(thr.tid(), exit_code) {
+        // AIO contexts pin the process address space and may have worker tasks
+        // waiting on outstanding requests. Tear them down before releasing the
+        // process address-space slot.
+        crate::syscall::cleanup_aio_contexts_for_pid(process.pid());
+
         // Close all file descriptors before marking the process as exited.
         // This ensures pipe write ends and other resources are properly released,
         // so parent processes blocking on pipe reads will receive EOF.
@@ -525,11 +573,15 @@ pub fn do_exit(exit_code: i32, group_exit: bool) {
         // after the task has been GC'd (mirrors Linux task_struct lifetime).
         let zombie_cred = thr.cred();
         let ptrace_tracer_pid = thr.proc_data.ptrace_tracer_pid();
+        let is_clone_child = thr.proc_data.is_clone_child();
+        let wait_parent_tid = thr.proc_data.wait_parent_tid;
         register_zombie(
             process.pid(),
             process.clone(),
             zombie_cred,
             ptrace_tracer_pid,
+            is_clone_child,
+            wait_parent_tid,
         );
         process.exit();
         if let Some(parent) = process.parent() {

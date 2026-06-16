@@ -1,10 +1,6 @@
 mod binding;
-#[cfg(any(
-    feature = "virtio-blk",
-    feature = "phytium-mci",
-    feature = "rockchip-dwmmc",
-    feature = "rockchip-sdhci"
-))]
+
+#[allow(unused)]
 mod shared;
 
 #[cfg(feature = "ahci")]
@@ -13,6 +9,8 @@ pub mod ahci;
 pub mod bcm2835;
 #[cfg(feature = "cvsd")]
 pub mod cvsd;
+#[cfg(feature = "k230-sdhci")]
+pub mod k230_sdhci;
 #[cfg(feature = "nvme")]
 pub mod nvme;
 #[cfg(feature = "phytium-mci")]
@@ -35,12 +33,7 @@ use rdif_block::{
     BlkError, DeviceInfo, DriverGeneric, IQueue, Interface, QueueInfo, QueueLimits, Request,
     RequestId, RequestOp, RequestStatus, validate_request,
 };
-#[cfg(any(
-    feature = "virtio-blk",
-    feature = "phytium-mci",
-    feature = "rockchip-dwmmc",
-    feature = "rockchip-sdhci"
-))]
+#[allow(unused)]
 pub(crate) use shared::SharedDriver;
 #[cfg(sync_block_dev)]
 use spin::Mutex;

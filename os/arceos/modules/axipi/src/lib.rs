@@ -6,7 +6,7 @@
 extern crate log;
 extern crate alloc;
 
-use core::sync::atomic::{AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use ax_hal::{
     irq::{IPI_IRQ, IpiTarget},
@@ -31,6 +31,8 @@ const IPI_CPU_READY: u8 = 2;
 static IPI_CPU_STATE: [AtomicU8; ax_config::plat::MAX_CPU_NUM] =
     [const { AtomicU8::new(IPI_CPU_NOT_READY) }; ax_config::plat::MAX_CPU_NUM];
 
+static IPI_READY_CPUS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
 /// Initialize the per-CPU IPI event queue.
 pub fn init() {
     IPI_EVENT_QUEUE.with_current(|ipi_queue| {
@@ -47,6 +49,15 @@ pub fn mark_current_cpu_ready() {
     IPI_CPU_STATE[cpu_id].store(IPI_CPU_BECOMING_READY, Ordering::Release);
     ax_hal::asm::flush_tlb(None);
     IPI_CPU_STATE[cpu_id].store(IPI_CPU_READY, Ordering::Release);
+    IPI_READY_CPUS.fetch_add(1, Ordering::Release);
+}
+
+/// Waits until every online CPU has completed [`mark_current_cpu_ready`].
+pub fn wait_for_all_cpus_ready() {
+    let cpu_num = ax_hal::cpu_num();
+    while IPI_READY_CPUS.load(Ordering::Acquire) < cpu_num {
+        core::hint::spin_loop();
+    }
 }
 
 /// Returns whether `cpu_id` is ready to receive and handle queued IPI callbacks.
@@ -77,7 +88,7 @@ pub fn wait_until_cpu_ready(cpu_id: usize) -> bool {
 
 /// Executes a callback on the specified destination CPU via IPI.
 pub fn run_on_cpu<T: Into<Callback>>(dest_cpu: usize, callback: T) {
-    info!("Send IPI event to CPU {dest_cpu}");
+    debug!("Send IPI event to CPU {dest_cpu}");
     if dest_cpu == this_cpu_id() {
         // Execute callback on current CPU immediately
         callback.into().call();
@@ -87,6 +98,51 @@ pub fn run_on_cpu<T: Into<Callback>>(dest_cpu: usize, callback: T) {
             .push(this_cpu_id(), callback.into());
         ax_hal::irq::send_ipi(IPI_IRQ, IpiTarget::Other { cpu_id: dest_cpu });
     }
+}
+
+/// Executes a raw thunk synchronously on the specified CPU via IPI.
+///
+/// # Safety
+///
+/// `arg` must remain valid until this function returns, and `f` must be safe
+/// to execute in the target CPU's IPI handler context.
+pub unsafe fn run_on_cpu_sync_raw(
+    dest_cpu: usize,
+    f: unsafe fn(*mut ()),
+    arg: *mut (),
+) -> Result<(), ax_hal::irq::IrqError> {
+    if dest_cpu >= ax_hal::cpu_num() {
+        return Err(ax_hal::irq::IrqError::InvalidCpu);
+    }
+    if !wait_until_cpu_ready(dest_cpu) {
+        return Err(ax_hal::irq::IrqError::CpuOffline);
+    }
+    if dest_cpu == this_cpu_id() {
+        unsafe { f(arg) };
+        return Ok(());
+    }
+
+    struct SyncCall {
+        done: AtomicBool,
+        f: unsafe fn(*mut ()),
+        arg: *mut (),
+    }
+
+    let call = SyncCall {
+        done: AtomicBool::new(false),
+        f,
+        arg,
+    };
+    let call_ptr = &call as *const SyncCall as usize;
+    run_on_cpu(dest_cpu, move || {
+        let call = unsafe { &*(call_ptr as *const SyncCall) };
+        unsafe { (call.f)(call.arg) };
+        call.done.store(true, Ordering::Release);
+    });
+    while !call.done.load(Ordering::Acquire) {
+        core::hint::spin_loop();
+    }
+    Ok(())
 }
 
 /// Executes a callback on all other CPUs via IPI.

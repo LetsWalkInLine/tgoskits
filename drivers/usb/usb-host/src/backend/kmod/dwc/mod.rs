@@ -512,7 +512,7 @@ impl Dwc {
                 DmaDirection::Bidirectional,
             )
             .map_err(|_| USBError::NoMemory)?;
-        scratchbuf.sync_for_device_all();
+        scratchbuf.prepare_for_device_all();
 
         self.scratchbuf = Some(scratchbuf);
         debug!(
@@ -696,6 +696,16 @@ impl CoreOp for Dwc {
             xhci: self.xhci.create_event_handler(),
             _dwc: self.dwc_regs.clone(),
         })
+    }
+
+    fn enable_irq(&mut self) -> Result<()> {
+        self.xhci.enable_irq();
+        Ok(())
+    }
+
+    fn disable_irq(&mut self) -> Result<()> {
+        self.xhci.disable_irq();
+        Ok(())
     }
 
     fn new_addressed_device<'a>(

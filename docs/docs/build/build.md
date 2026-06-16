@@ -15,7 +15,7 @@ sidebar_label: "构建过程"
 
 ```mermaid
 flowchart TD
-    A["cargo xtask arceos build<br/>--package ax-helloworld"] --> B[1. 初始化 AppContext]
+    A["cargo xtask arceos build<br/>--package arceos-helloworld"] --> B[1. 初始化 AppContext]
     B --> C["2. 参数解析"]
     C --> C1["Snapshot 不存在 → 空 Snapshot<br/>CLI 参数 + 子系统默认值"]
     C1 --> C2["创建并写回 Snapshot<br/>(tmp/axbuild/.arceos.toml)"]
@@ -171,14 +171,14 @@ Feature 解析是构建过程中最复杂的阶段之一。它需要处理多个
 
 ```mermaid
 flowchart TD
-    A["plat_dyn = false"] --> B["从 Cargo.toml 找到平台依赖包<br/>(如 ax-plat-aarch64-qemu-virt)"]
+    A["plat_dyn = false"] --> B["从 Cargo.toml 找到平台依赖包<br/>(如 ax-plat-riscv64-sg2002)"]
     B --> C["定位平台包配置文件"]
     C --> D["调用配置引擎库"]
     D --> E["生成 .axconfig.toml<br/>到 tmp/axbuild/axconfig/"]
     E --> F["注入 AX_CONFIG_PATH<br/>和 AX_PLATFORM 环境变量"]
 ```
 
-ArceOS 的平台配置（如内存布局、中断控制器地址、串口基地址等）由 `axbuild` 复用配置引擎库从平台包配置文件中合并生成 `.axconfig.toml`。在动态平台模式下（`plat_dyn = true`），这些配置由运行时动态加载；在静态模式下，必须在编译前预生成并注入 `AX_CONFIG_PATH` 环境变量，使得 OS 源码中的配置宏能在编译期读取配置。
+ArceOS 的平台配置（如内存布局、中断控制器地址、串口基地址等）由 `axbuild` 复用配置引擎库从平台包配置文件中合并生成 `.axconfig.toml`。动态平台模式是支持动态平台 target 的默认构建方式，配置可省略 `plat_dyn`；在静态模式下（`plat_dyn = false`），必须在编译前预生成并注入 `AX_CONFIG_PATH` 环境变量，使得 OS 源码中的配置宏能在编译期读取配置。
 
 ### 6a. 平台包解析
 
@@ -186,8 +186,8 @@ ArceOS 的平台配置（如内存布局、中断控制器地址、串口基地�
 
 | 目录 | 命名示例 | 包名格式 | 定位方式 |
 |------|---------|---------|---------|
-| `platforms/` | `axplat-riscv64-qemu-virt/` | `ax-plat-riscv64-qemu-virt` | Workspace member，通过 cargo metadata 直接定位 |
-| `platforms/` | `axplat-aarch64-qemu-virt/` | `ax-plat-aarch64-qemu-virt` | Workspace/deps metadata；必要时可按目录约定回退 |
+| `platforms/` | `ax-plat-riscv64-sg2002/` | `ax-plat-riscv64-sg2002` | Workspace member，通过 cargo metadata 直接定位 |
+| `platforms/` | `ax-plat-loongarch64-qemu-virt/` | `ax-plat-loongarch64-qemu-virt` | Workspace/deps metadata；必要时可按目录约定回退 |
 
 `axbuild` 通过 `resolve_platform_package()` 按以下优先级确定平台包：
 
@@ -198,8 +198,7 @@ flowchart TD
     C --> D["返回匹配的依赖包名"]
     B -->|否| E{feature 包含 myplat?}
     E -->|是| F{是 Axvisor?}
-    F -->|x86_64| G["→ ax-plat-x86-qemu-q35"]
-    F -->|riscv64| H["→ ax-plat-riscv64-qemu-virt"]
+    F -->|是| G["要求动态平台<br/>或显式平台包"]
     F -->|否| I["在依赖中查找<br/>架构前缀匹配的平台包"]
     E -->|否| J["回退到默认平台"]
     J --> K[default_platform_package]
@@ -209,15 +208,15 @@ flowchart TD
 
 | 架构 | 默认平台包 |
 |------|-----------|
-| `aarch64` | `ax-plat-aarch64-qemu-virt` |
-| `x86_64` | `ax-plat-x86-pc` |
-| `riscv64` | `ax-plat-riscv64-qemu-virt` |
+| `aarch64` | 无静态默认平台；默认使用动态平台 |
+| `x86_64` | 无静态默认平台；默认使用动态平台 |
+| `riscv64` | 无静态默认平台；默认使用动态平台 |
 | `loongarch64` | `ax-plat-loongarch64-qemu-virt` |
 
 **平台包命名规则**：
-- 新命名格式 `ax-plat-{arch}-{board}`（如 `ax-plat-aarch64-qemu-virt`），是当前推荐格式
+- 新命名格式 `ax-plat-{arch}-{board}`（如 `ax-plat-riscv64-sg2002`），是当前推荐格式
 - 旧命名格式 `axplat-{arch}-{board}`，向后兼容
-- `linker_platform_name()` 去掉两种前缀后得到相同的平台名（用于 feature 匹配），例如 `ax-plat-riscv64-qemu-virt` 和 `axplat-riscv64-qemu-virt` 都映射为 `riscv64-qemu-virt`
+- `linker_platform_name()` 去掉两种前缀后得到相同的平台名（用于 feature 匹配），例如 `ax-plat-riscv64-sg2002` 和 `axplat-riscv64-sg2002` 都映射为 `riscv64-sg2002`
 
 ### 6b. 平台配置文件查找
 
@@ -225,7 +224,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A["resolve_platform_config_path<br/>(包名: ax-plat-aarch64-qemu-virt)"] --> B["1. 在 workspace metadata 中查找<br/>→ 找到 Cargo.toml 所在目录<br/>→ 检查同目录下的 axconfig.toml"]
+    A["resolve_platform_config_path<br/>(包名: ax-plat-riscv64-sg2002)"] --> B["1. 在 workspace metadata 中查找<br/>→ 找到 Cargo.toml 所在目录<br/>→ 检查同目录下的 axconfig.toml"]
     B --> C{找到?}
     C -->|是| D["返回路径"]
     C -->|否| E["2. 在 deps metadata 中查找<br/>(同样逻辑)"]
@@ -236,14 +235,14 @@ flowchart TD
     H -->|是| D
     H -->|否| I["错误：无法解析平台配置"]
 ```
-**两级 metadata 查找**：第1步 `workspace metadata` 查找的是 workspace `Cargo.toml` 的 `[workspace.members]` 中声明的包。对 `platforms/` 下的平台包（如 `ax-plat-riscv64-qemu-virt`），其 `Cargo.toml`（如 `platforms/ax-plat-riscv64-qemu-virt/Cargo.toml`）旁即为 `axconfig.toml`。第2步 `deps metadata` 查找的是传递依赖中的包，覆盖平台包位于 workspace 外部或被间接依赖的场景。只有在两步都找不到时，才进入第3步的目录约定回退。
+**两级 metadata 查找**：第1步 `workspace metadata` 查找的是 workspace `Cargo.toml` 的 `[workspace.members]` 中声明的包。对 `platforms/` 下的平台包（如 `ax-plat-riscv64-sg2002`），其 `Cargo.toml`（如 `platforms/ax-plat-riscv64-sg2002/Cargo.toml`）旁即为 `axconfig.toml`。第2步 `deps metadata` 查找的是传递依赖中的包，覆盖平台包位于 workspace 外部或被间接依赖的场景。只有在两步都找不到时，才进入第3步的目录约定回退。
 
 **回退路径的包名 ↔ 目录名映射**：
 
 当通过 workspace/debug metadata 均找不到平台包的 `axconfig.toml` 时，`find_local_platform_config_path()` 执行包名到目录名的转换：
 
-- `ax-plat-aarch64-qemu-virt` → 去掉前缀 `ax-plat-` → `aarch64-qemu-virt` → 重新拼为 `axplat-aarch64-qemu-virt`
-- 最终路径：`platforms/ax-plat-aarch64-qemu-virt/axconfig.toml`
+- `ax-plat-riscv64-sg2002` → 去掉前缀 `ax-plat-` → `riscv64-sg2002` → 重新拼为 `axplat-riscv64-sg2002`
+- 最终路径：`platforms/ax-plat-riscv64-sg2002/axconfig.toml`
 
 这一映射确保平台包位于 `platforms/` 时，`axbuild` 能正确找到配置文件。平台名（`platform` 字段）优先从 `axconfig.toml` 中的 `platform` 键读取，读取失败时回退到 `linker_platform_name()` 从包名中提取。
 
@@ -303,7 +302,7 @@ flowchart TD
 
 ### 编译期文件写入（write_if_changed）
 
-axbuild 在生成构建辅助文件（如 ArceOS std 的 `.cargo/config.toml` 和 `loongarch64-unknown-hermit.json`）时使用 `write_if_changed` 模式：写入前先读取已有内容，内容相同时跳过写入。这避免了因时间戳更新导致 cargo 不必要的重建——cargo 的增量编译依赖文件 mtime 判断是否需要重新编译，`write_if_changed` 确保只有真正变化的配置才会触发重建。
+axbuild 在生成构建辅助文件（如 ArceOS std 的 `.cargo/config.toml`、fake libc 预构建脚本和 linker wrapper）时使用 `write_if_changed` 模式：写入前先读取已有内容，内容相同时跳过写入。这避免了因时间戳更新导致 cargo 不必要的重建——cargo 的增量编译依赖文件 mtime 判断是否需要重新编译，`write_if_changed` 确保只有真正变化的配置才会触发重建。
 
 ### 环境变量作用域保护（EnvRestoreGuard）
 

@@ -4,21 +4,19 @@ mod plic;
 
 pub struct Plat;
 
-pub fn register_current_cpu_id(cpu_idx: usize, reader: fn() -> usize) {
-    plic::register_current_cpu_id(cpu_idx, reader);
-}
-
 impl PlatOp for Plat {
+    type ActiveIrq = plic::ActiveIrq;
+
     fn irq_set_enable(irq: rdrive::IrqId, enable: bool) {
         plic::irq_set_enable(irq, enable);
     }
 
-    fn irq_handler() -> someboot::irq::IrqId {
-        someboot::irq::IrqId::new(plic::systick_irq().raw())
+    fn begin_irq(raw: usize) -> Option<Self::ActiveIrq> {
+        plic::begin_irq(raw)
     }
 
-    fn irq_handler_with_raw(raw: usize) -> Option<someboot::irq::IrqId> {
-        plic::irq_handler_with_raw(raw)
+    fn active_irq_id(active: &Self::ActiveIrq) -> rdrive::IrqId {
+        active.id()
     }
 
     fn systick_irq() -> rdrive::IrqId {

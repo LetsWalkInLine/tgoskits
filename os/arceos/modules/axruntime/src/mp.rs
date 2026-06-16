@@ -159,12 +159,11 @@ pub fn rust_main_secondary(cpu_id: usize) -> ! {
     #[cfg(feature = "ipi")]
     ax_ipi::init();
 
-    info!("Secondary CPU {cpu_id:x} init OK.");
-    super::INITED_CPUS.fetch_add(1, Ordering::Release);
-
-    while !super::is_init_ok() {
-        core::hint::spin_loop();
-    }
+    // Bring up local IRQ/IPI delivery before publishing INITED_CPUS so the
+    // primary cannot enter user-visible init while remote CPUs still lack SGI
+    // handlers or pending per-CPU IRQ enables.
+    #[cfg(feature = "irq")]
+    super::init_percpu_irq(cpu_id);
 
     #[cfg(feature = "irq")]
     ax_hal::asm::enable_irqs();
@@ -172,8 +171,12 @@ pub fn rust_main_secondary(cpu_id: usize) -> ! {
     #[cfg(all(feature = "irq", feature = "ipi"))]
     ax_ipi::mark_current_cpu_ready();
 
-    #[cfg(feature = "irq")]
-    ax_hal::time::set_oneshot_timer(100);
+    info!("Secondary CPU {cpu_id:x} init OK.");
+    super::INITED_CPUS.fetch_add(1, Ordering::Release);
+
+    while !super::is_init_ok() {
+        core::hint::spin_loop();
+    }
 
     #[cfg(all(feature = "tls", not(feature = "multitask")))]
     super::init_tls();

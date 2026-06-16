@@ -1,4 +1,4 @@
-use ax_plat::irq::{HandlerTable, IpiTarget, IrqHandler, IrqIf};
+use ax_plat::irq::{IpiTarget, IrqIf, dispatch_irq};
 use loongArch64::{
     iocsr::{iocsr_read_w, iocsr_write_w},
     register::{
@@ -13,8 +13,6 @@ use crate::config::devices::{EIOINTC_IRQ, IPI_IRQ, TIMER_IRQ};
 mod eiointc;
 mod pch_pic;
 
-/// The maximum number of IRQs.
-pub const MAX_IRQ_COUNT: usize = 256;
 const IOCSR_IPI_SEND_CPU_SHIFT: u32 = 16;
 const IOCSR_IPI_SEND_BLOCKING: u32 = 1 << 31;
 
@@ -32,8 +30,6 @@ fn make_ipi_send_value(cpu_id: usize, vector: u32, blocking: bool) -> u32 {
     }
     value
 }
-
-static IRQ_HANDLER_TABLE: HandlerTable<MAX_IRQ_COUNT> = HandlerTable::new();
 
 pub(crate) fn init() {
     eiointc::init();
@@ -111,31 +107,7 @@ impl IrqIf for IrqIfImpl {
         }
     }
 
-    /// Registers an IRQ handler for the given IRQ.
-    fn register(irq: usize, handler: IrqHandler) -> bool {
-        if IRQ_HANDLER_TABLE.register_handler(irq, handler) {
-            Self::set_enable(irq, true);
-            return true;
-        }
-        warn!("register handler for IRQ {} failed", irq);
-        false
-    }
-
-    /// Unregisters the IRQ handler for the given IRQ.
-    ///
-    /// It also disables the IRQ if the unregistration succeeds. It returns the
-    /// existing handler if it is registered, `None` otherwise.
-    fn unregister(irq: usize) -> Option<IrqHandler> {
-        IRQ_HANDLER_TABLE
-            .unregister_handler(irq)
-            .inspect(|_| Self::set_enable(irq, false))
-    }
-
     /// Handles the IRQ.
-    ///
-    /// It is called by the common interrupt handler. It should look up in the
-    /// IRQ handler table and calls the corresponding handler. If necessary, it
-    /// also acknowledges the interrupt controller after handling.
     fn handle(irq: usize) -> Option<usize> {
         let mut irq = IrqType::new(irq);
 
@@ -149,34 +121,40 @@ impl IrqIf for IrqIfImpl {
 
         trace!("IRQ {irq:?}");
 
-        if let IrqType::Ipi = irq {
-            let mut status = iocsr_read_w(IOCSR_IPI_STATUS);
-            if status != 0 {
-                iocsr_write_w(IOCSR_IPI_CLEAR, status);
-                trace!("IPI status = {:#x}", status);
+        match irq {
+            IrqType::Timer => {
+                // Clear the interrupt before dispatching. The timer handler
+                // programs the next one-shot event; clearing afterwards can
+                // drop a freshly-pending event and leave sleepers blocked.
+                ticlr::clear_timer_interrupt();
+                if !dispatch_irq(irq.as_usize()).handled {
+                    debug!("Unhandled IRQ {irq:?}");
+                }
+            }
+            IrqType::Ipi => {
+                let mut status = iocsr_read_w(IOCSR_IPI_STATUS);
+                if status != 0 {
+                    iocsr_write_w(IOCSR_IPI_CLEAR, status);
+                    trace!("IPI status = {:#x}", status);
 
-                while status != 0 {
-                    let vector = status.trailing_zeros() as usize;
-                    status &= !(1 << vector);
-                    if !IRQ_HANDLER_TABLE.handle(irq.as_usize()) {
-                        warn!("Unhandled IRQ {irq:?}");
+                    while status != 0 {
+                        let vector = status.trailing_zeros() as usize;
+                        status &= !(1 << vector);
+                        if !dispatch_irq(irq.as_usize()).handled {
+                            warn!("Unhandled IRQ {irq:?}");
+                        }
                     }
                 }
             }
-        } else {
-            if !IRQ_HANDLER_TABLE.handle(irq.as_usize()) {
-                debug!("Unhandled IRQ {irq:?}");
+            IrqType::Io | IrqType::Ex(_) => {
+                if !dispatch_irq(irq.as_usize()).handled {
+                    debug!("Unhandled IRQ {irq:?}");
+                }
             }
         }
 
-        match irq {
-            IrqType::Timer => {
-                ticlr::clear_timer_interrupt();
-            }
-            IrqType::Ex(irq) => {
-                eiointc::complete_irq(irq);
-            }
-            _ => {}
+        if let IrqType::Ex(irq) = irq {
+            eiointc::complete_irq(irq);
         }
 
         Some(irq.as_usize())
